@@ -208,6 +208,7 @@ export default function HYDR801App() {
   const providerScreens = {
     dashboard: <ProviderDashboard patients={patients} setCurrentScreen={setCurrentScreen} />,
     patients: <PatientListScreen patients={patients} setCurrentScreen={setCurrentScreen} />,
+    payments: <PaymentsScreen />,
     messages: <MessagesScreen patients={patients} />,
     analytics: <AnalyticsScreen patients={patients} />,
     settings: <ProviderSettingsScreen />,
@@ -773,7 +774,7 @@ function PatientDetailScreen({ patient, onBack }) {
 
       {/* Tabs */}
       <div style={styles.pdTabs}>
-        {['overview', 'injections', 'nutrition', 'fitness', 'weight'].map(tab => (
+        {['overview', 'injections', 'payments', 'nutrition', 'fitness', 'weight'].map(tab => (
           <button
             key={tab}
             style={{...styles.pdTab, ...(activeTab === tab ? styles.pdTabActive : {})}}
@@ -935,6 +936,10 @@ function PatientDetailScreen({ patient, onBack }) {
         </div>
       )}
 
+      {activeTab === 'payments' && (
+        <PatientPaymentHistory patientId={patient.id} />
+      )}
+
       {activeTab === 'weight' && (
         <div className="fade-in">
           <div style={styles.pdWeightChart}>
@@ -1001,6 +1006,167 @@ function PatientDetailScreen({ patient, onBack }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Patient Payment History Component
+function PatientPaymentHistory({ patientId }) {
+  const [payments, setPayments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
+
+  useEffect(() => {
+    loadPatientPayments();
+  }, [patientId]);
+
+  const loadPatientPayments = async () => {
+    try {
+      setLoading(true);
+      const res = await fetch(`/api/payments?patient_id=${patientId}&limit=50`);
+      if (res.ok) {
+        const data = await res.json();
+        setPayments(data.payments || []);
+        
+        // Calculate total paid
+        const totalPaid = (data.payments || [])
+          .filter(p => p.status === 'Paid')
+          .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+        setTotal(totalPaid);
+      }
+      setLoading(false);
+    } catch (err) {
+      console.error('Error loading patient payments:', err);
+      setLoading(false);
+    }
+  };
+
+  const formatCurrency = (val) => {
+    const num = parseFloat(val) || 0;
+    return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  const getStatusStyle = (status) => {
+    const baseStyle = {
+      display: 'inline-block',
+      padding: '4px 12px',
+      borderRadius: '12px',
+      fontSize: '11px',
+      fontWeight: '600',
+    };
+    
+    switch(status) {
+      case 'Paid':
+        return { ...baseStyle, background: '#d4edda', color: '#155724' };
+      case 'Sent':
+        return { ...baseStyle, background: '#fff3cd', color: '#856404' };
+      case 'Canceled':
+        return { ...baseStyle, background: '#f8d7da', color: '#721c24' };
+      case 'Refunded':
+        return { ...baseStyle, background: '#ffe5cc', color: '#8B4000' };
+      default:
+        return { ...baseStyle, background: '#e2e3e5', color: '#383d41' };
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
+        Loading payment history...
+      </div>
+    );
+  }
+
+  if (payments.length === 0) {
+    return (
+      <div style={{
+        padding: '40px',
+        textAlign: 'center',
+        background: 'white',
+        borderRadius: '12px',
+        marginTop: '16px'
+      }}>
+        <div style={{ fontSize: '48px', marginBottom: '12px' }}>💳</div>
+        <p style={{ color: '#666', fontSize: '14px' }}>No payment history</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fade-in">
+      {/* Summary Card */}
+      <div style={{
+        background: 'white',
+        borderRadius: '12px',
+        padding: '20px',
+        marginBottom: '16px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+      }}>
+        <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Total Paid</div>
+        <div style={{ fontSize: '32px', fontWeight: '700', color: '#4A6741' }}>
+          {formatCurrency(total)}
+        </div>
+        <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
+          {payments.filter(p => p.status === 'Paid').length} transactions
+        </div>
+      </div>
+
+      {/* Payment List */}
+      <div style={{
+        background: 'white',
+        borderRadius: '12px',
+        overflow: 'hidden',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+      }}>
+        <div style={{
+          padding: '16px',
+          borderBottom: '1px solid #f0f0f0',
+          fontSize: '14px',
+          fontWeight: '600',
+          color: '#333'
+        }}>
+          Payment History
+        </div>
+        
+        {payments.map((payment, idx) => (
+          <div
+            key={payment.id || idx}
+            style={{
+              padding: '16px',
+              borderBottom: idx < payments.length - 1 ? '1px solid #f0f0f0' : 'none',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div style={{
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#333',
+                marginBottom: '4px'
+              }}>
+                {payment.description || 'Payment'}
+              </div>
+              <div style={{ fontSize: '11px', color: '#999' }}>
+                {payment.date}
+              </div>
+            </div>
+            
+            <div style={{ textAlign: 'right' }}>
+              <div style={{
+                fontSize: '15px',
+                fontWeight: '700',
+                color: payment.status === 'Paid' ? '#4A6741' : '#666',
+                marginBottom: '4px'
+              }}>
+                {formatCurrency(payment.amount)}
+              </div>
+              <span style={getStatusStyle(payment.status)}>{payment.status}</span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1136,11 +1302,862 @@ function ProviderSettingsScreen() {
   );
 }
 
+// ==================== PAYMENTS SCREEN ====================
+function PaymentsScreen() {
+  const [payments, setPayments] = useState([]);
+  const [dailySummaries, setDailySummaries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [needsMigration, setNeedsMigration] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  
+  // Filters
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [statusFilter, setStatusFilter] = useState('All');
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const itemsPerPage = 25;
+  
+  // Sorting
+  const [sortBy, setSortBy] = useState('date');
+  const [sortOrder, setSortOrder] = useState('desc');
+  
+  // Modals
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [selectedPayment, setSelectedPayment] = useState(null);
+
+  // Summary stats
+  const [summaryStats, setSummaryStats] = useState({
+    todayPaid: 0,
+    todayCount: 0,
+    weekPaid: 0,
+    weekCount: 0,
+    monthPaid: 0,
+    monthCount: 0,
+    outstanding: 0
+  });
+
+  useEffect(() => {
+    loadPayments();
+    loadDailySummaries();
+  }, [dateFrom, dateTo, statusFilter, currentPage, sortBy, sortOrder]);
+
+  const loadPayments = async () => {
+    try {
+      setLoading(true);
+      const params = new URLSearchParams({
+        limit: itemsPerPage,
+        offset: (currentPage - 1) * itemsPerPage,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      });
+      
+      if (dateFrom) params.append('date_from', dateFrom);
+      if (dateTo) params.append('date_to', dateTo);
+      if (statusFilter !== 'All') params.append('status', statusFilter);
+      
+      const res = await fetch(`/api/payments?${params}`);
+      
+      if (res.status === 404) {
+        setNeedsMigration(true);
+        setLoading(false);
+        return;
+      }
+      
+      const data = await res.json();
+      setPayments(data.payments || []);
+      setTotalPages(Math.ceil((data.total || 0) / itemsPerPage));
+      
+      // Calculate summary stats
+      calculateSummaryStats(data.payments || []);
+      
+      setNeedsMigration(false);
+      setLoading(false);
+    } catch (err) {
+      console.error('Error loading payments:', err);
+      setNeedsMigration(true);
+      setLoading(false);
+    }
+  };
+
+  const loadDailySummaries = async () => {
+    try {
+      const params = new URLSearchParams({ days: 30 });
+      const res = await fetch(`/api/payments-daily?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDailySummaries(data.daily || []);
+      }
+    } catch (err) {
+      console.error('Error loading daily summaries:', err);
+    }
+  };
+
+  const calculateSummaryStats = (allPayments) => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    let todayPaid = 0, todayCount = 0;
+    let weekPaid = 0, weekCount = 0;
+    let monthPaid = 0, monthCount = 0;
+    let outstanding = 0;
+
+    allPayments.forEach(p => {
+      const pDate = new Date(p.date);
+      const amount = parseFloat(p.amount) || 0;
+      
+      if (p.status === 'Paid') {
+        if (pDate >= today) {
+          todayPaid += amount;
+          todayCount++;
+        }
+        if (pDate >= weekAgo) {
+          weekPaid += amount;
+          weekCount++;
+        }
+        if (pDate >= monthAgo) {
+          monthPaid += amount;
+          monthCount++;
+        }
+      } else if (p.status === 'Sent') {
+        outstanding += amount;
+      }
+    });
+
+    setSummaryStats({
+      todayPaid,
+      todayCount,
+      weekPaid,
+      weekCount,
+      monthPaid,
+      monthCount,
+      outstanding
+    });
+  };
+
+  const runMigration = async () => {
+    try {
+      setMigrating(true);
+      const res = await fetch('/api/migrate-payments');
+      if (res.ok) {
+        setNeedsMigration(false);
+        loadPayments();
+        loadDailySummaries();
+      }
+    } catch (err) {
+      console.error('Migration error:', err);
+    } finally {
+      setMigrating(false);
+    }
+  };
+
+  const handleSort = (column) => {
+    if (sortBy === column) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortBy(column);
+      setSortOrder('desc');
+    }
+    setCurrentPage(1);
+  };
+
+  const formatCurrency = (val) => {
+    const num = parseFloat(val) || 0;
+    return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  const getStatusStyle = (status) => {
+    const baseStyle = {
+      display: 'inline-block',
+      padding: '4px 12px',
+      borderRadius: '12px',
+      fontSize: '12px',
+      fontWeight: '600',
+    };
+    
+    switch(status) {
+      case 'Paid':
+        return { ...baseStyle, background: '#d4edda', color: '#155724' };
+      case 'Sent':
+        return { ...baseStyle, background: '#fff3cd', color: '#856404' };
+      case 'Canceled':
+        return { ...baseStyle, background: '#f8d7da', color: '#721c24' };
+      case 'Refunded':
+        return { ...baseStyle, background: '#ffe5cc', color: '#8B4000' };
+      default:
+        return { ...baseStyle, background: '#e2e3e5', color: '#383d41' };
+    }
+  };
+
+  const filteredPayments = payments.filter(p => {
+    if (!searchQuery) return true;
+    return p.patient_name?.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  if (needsMigration) {
+    return (
+      <div style={styles.screenContent} className="fade-in">
+        <header style={styles.pageHeader}>
+          <h1 style={styles.pageTitle}>💰 Payments</h1>
+          <p style={styles.pageSubtitle}>Payment tracking & reporting</p>
+        </header>
+
+        <div style={{
+          background: 'white',
+          borderRadius: '16px',
+          padding: '32px',
+          textAlign: 'center',
+          marginTop: '40px'
+        }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>💳</div>
+          <h3 style={{ fontSize: '20px', marginBottom: '12px', color: '#333' }}>Set Up Payments</h3>
+          <p style={{ color: '#666', marginBottom: '24px' }}>
+            Initialize the payments system to start tracking transactions.
+          </p>
+          <button
+            style={{
+              ...styles.primaryButton,
+              fontSize: '16px',
+              padding: '12px 32px'
+            }}
+            onClick={runMigration}
+            disabled={migrating}
+          >
+            {migrating ? 'Setting up...' : 'Initialize Payments'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.screenContent} className="fade-in">
+      <header style={styles.pageHeader}>
+        <h1 style={styles.pageTitle}>💰 Payments</h1>
+        <p style={styles.pageSubtitle}>Payment tracking & reporting</p>
+      </header>
+
+      {/* Summary Cards */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+        gap: '12px',
+        marginBottom: '20px'
+      }}>
+        <div style={styles.paymentsCard}>
+          <div style={{ fontSize: '11px', color: '#666', marginBottom: '4px' }}>Today</div>
+          <div style={{ fontSize: '24px', fontWeight: '700', color: '#4A6741' }}>
+            {formatCurrency(summaryStats.todayPaid)}
+          </div>
+          <div style={{ fontSize: '11px', color: '#999' }}>{summaryStats.todayCount} payments</div>
+        </div>
+
+        <div style={styles.paymentsCard}>
+          <div style={{ fontSize: '11px', color: '#666', marginBottom: '4px' }}>This Week</div>
+          <div style={{ fontSize: '24px', fontWeight: '700', color: '#4A6741' }}>
+            {formatCurrency(summaryStats.weekPaid)}
+          </div>
+          <div style={{ fontSize: '11px', color: '#999' }}>{summaryStats.weekCount} payments</div>
+        </div>
+
+        <div style={styles.paymentsCard}>
+          <div style={{ fontSize: '11px', color: '#666', marginBottom: '4px' }}>This Month</div>
+          <div style={{ fontSize: '24px', fontWeight: '700', color: '#4A6741' }}>
+            {formatCurrency(summaryStats.monthPaid)}
+          </div>
+          <div style={{ fontSize: '11px', color: '#999' }}>{summaryStats.monthCount} payments</div>
+        </div>
+
+        <div style={styles.paymentsCard}>
+          <div style={{ fontSize: '11px', color: '#666', marginBottom: '4px' }}>Outstanding</div>
+          <div style={{ fontSize: '24px', fontWeight: '700', color: '#856404' }}>
+            {formatCurrency(summaryStats.outstanding)}
+          </div>
+          <div style={{ fontSize: '11px', color: '#999' }}>Unpaid</div>
+        </div>
+      </div>
+
+      {/* Daily Revenue Chart */}
+      {dailySummaries.length > 0 && (
+        <div style={{ ...styles.paymentsCard, marginBottom: '20px', padding: '16px' }}>
+          <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', color: '#333' }}>
+            Daily Revenue (Last 30 Days)
+          </h3>
+          <DailyRevenueChart data={dailySummaries} />
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style={{
+        background: 'white',
+        borderRadius: '12px',
+        padding: '16px',
+        marginBottom: '16px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+      }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+          gap: '12px',
+          marginBottom: '12px'
+        }}>
+          <div>
+            <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }}
+              style={styles.paymentInput}
+            />
+          </div>
+          
+          <div>
+            <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>To</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }}
+              style={styles.paymentInput}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>Status</label>
+            <select
+              value={statusFilter}
+              onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
+              style={styles.paymentInput}
+            >
+              <option>All</option>
+              <option>Paid</option>
+              <option>Sent</option>
+              <option>Canceled</option>
+              <option>Refunded</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <input
+            type="text"
+            placeholder="Search patient name..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ ...styles.paymentInput, flex: 1 }}
+          />
+          
+          <button
+            style={{
+              ...styles.primaryButton,
+              fontSize: '13px',
+              padding: '8px 16px',
+              whiteSpace: 'nowrap'
+            }}
+            onClick={() => setShowImportModal(true)}
+          >
+            📥 Import CSV
+          </button>
+        </div>
+      </div>
+
+      {/* Transactions Table */}
+      <div style={{
+        background: 'white',
+        borderRadius: '12px',
+        overflow: 'hidden',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+        marginBottom: '16px'
+      }}>
+        {loading ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
+            Loading payments...
+          </div>
+        ) : filteredPayments.length === 0 ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
+            No payments found
+          </div>
+        ) : (
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f8f9fa', borderBottom: '2px solid #e9ecef' }}>
+                    <th style={styles.tableHeader} onClick={() => handleSort('date')}>
+                      Date {sortBy === 'date' && (sortOrder === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th style={styles.tableHeader} onClick={() => handleSort('patient_name')}>
+                      Patient {sortBy === 'patient_name' && (sortOrder === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th style={styles.tableHeader}>Description</th>
+                    <th style={styles.tableHeader} onClick={() => handleSort('status')}>
+                      Status {sortBy === 'status' && (sortOrder === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th style={styles.tableHeader} onClick={() => handleSort('amount')}>
+                      Amount {sortBy === 'amount' && (sortOrder === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th style={styles.tableHeader}>Net</th>
+                    <th style={styles.tableHeader}>Fees</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPayments.map((payment, idx) => (
+                    <tr
+                      key={payment.id || idx}
+                      style={{
+                        borderBottom: '1px solid #f0f0f0',
+                        cursor: 'pointer'
+                      }}
+                      onClick={() => setSelectedPayment(payment)}
+                      onMouseEnter={(e) => e.currentTarget.style.background = '#fafbfc'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'white'}
+                    >
+                      <td style={styles.tableCell}>{payment.date}</td>
+                      <td style={styles.tableCell}>{payment.patient_name || '—'}</td>
+                      <td style={styles.tableCell}>{payment.description || '—'}</td>
+                      <td style={styles.tableCell}>
+                        <span style={getStatusStyle(payment.status)}>{payment.status}</span>
+                      </td>
+                      <td style={{ ...styles.tableCell, fontWeight: '600' }}>
+                        {formatCurrency(payment.amount)}
+                      </td>
+                      <td style={styles.tableCell}>
+                        {payment.net ? formatCurrency(payment.net) : '—'}
+                      </td>
+                      <td style={{ ...styles.tableCell, color: '#999' }}>
+                        {payment.fees ? formatCurrency(payment.fees) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div style={{
+                padding: '16px',
+                display: 'flex',
+                justifyContent: 'center',
+                gap: '8px',
+                borderTop: '1px solid #f0f0f0'
+              }}>
+                <button
+                  style={styles.paginationBtn}
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  ←
+                </button>
+                
+                <span style={{ padding: '8px 16px', fontSize: '14px', color: '#666' }}>
+                  Page {currentPage} of {totalPages}
+                </span>
+                
+                <button
+                  style={styles.paginationBtn}
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                >
+                  →
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* CSV Import Modal */}
+      {showImportModal && (
+        <CSVImportModal
+          onClose={() => setShowImportModal(false)}
+          onImportComplete={() => {
+            setShowImportModal(false);
+            loadPayments();
+            loadDailySummaries();
+          }}
+        />
+      )}
+
+      {/* Payment Detail Modal */}
+      {selectedPayment && (
+        <PaymentDetailModal
+          payment={selectedPayment}
+          onClose={() => setSelectedPayment(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Daily Revenue Chart Component
+function DailyRevenueChart({ data }) {
+  const chartRef = useRef(null);
+  const [hoveredDay, setHoveredDay] = useState(null);
+  const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
+
+  const maxAmount = Math.max(...data.map(d => parseFloat(d.total) || 0), 1);
+  const chartHeight = 120;
+  const barWidth = Math.max(8, Math.floor((300 - data.length * 2) / data.length));
+
+  const formatCurrency = (val) => {
+    const num = parseFloat(val) || 0;
+    return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  };
+
+  const formatDate = (dateStr) => {
+    const d = new Date(dateStr);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <svg
+        ref={chartRef}
+        width="100%"
+        height={chartHeight}
+        style={{ display: 'block' }}
+      >
+        {data.map((day, idx) => {
+          const amount = parseFloat(day.total) || 0;
+          const barHeight = (amount / maxAmount) * (chartHeight - 20);
+          const x = idx * (barWidth + 2);
+          const y = chartHeight - barHeight;
+
+          return (
+            <rect
+              key={idx}
+              x={x}
+              y={y}
+              width={barWidth}
+              height={barHeight}
+              fill={hoveredDay === idx ? '#6B8E63' : '#4A6741'}
+              opacity={hoveredDay === idx ? 1 : 0.8}
+              rx="2"
+              onMouseEnter={(e) => {
+                setHoveredDay(idx);
+                const rect = e.target.getBoundingClientRect();
+                setHoverPos({ x: rect.left, y: rect.top });
+              }}
+              onMouseLeave={() => setHoveredDay(null)}
+              style={{ cursor: 'pointer', transition: 'all 0.2s' }}
+            />
+          );
+        })}
+      </svg>
+
+      {hoveredDay !== null && (
+        <div style={{
+          position: 'absolute',
+          top: '-40px',
+          left: `${hoveredDay * (barWidth + 2)}px`,
+          background: '#1a1a2e',
+          color: 'white',
+          padding: '8px 12px',
+          borderRadius: '8px',
+          fontSize: '12px',
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+          zIndex: 10,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+        }}>
+          <div style={{ fontWeight: '600' }}>{formatCurrency(data[hoveredDay].total)}</div>
+          <div style={{ fontSize: '10px', opacity: 0.8 }}>{formatDate(data[hoveredDay].date)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// CSV Import Modal
+function CSVImportModal({ onClose, onImportComplete }) {
+  const [csvText, setCsvText] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const file = e.dataTransfer.files[0];
+    if (file && file.type === 'text/csv') {
+      const reader = new FileReader();
+      reader.onload = (evt) => setCsvText(evt.target.result);
+      reader.readAsText(file);
+    }
+  };
+
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (evt) => setCsvText(evt.target.result);
+      reader.readAsText(file);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!csvText.trim()) return;
+    
+    try {
+      setImporting(true);
+      const res = await fetch('/api/payments-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv' },
+        body: csvText
+      });
+      
+      const data = await res.json();
+      setResult(data);
+      
+      if (data.imported > 0) {
+        setTimeout(() => {
+          onImportComplete();
+        }, 2000);
+      }
+    } catch (err) {
+      console.error('Import error:', err);
+      setResult({ error: 'Import failed' });
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const previewRows = csvText.split('\n').slice(0, 6);
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modalContent, maxWidth: '600px', maxHeight: '80vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h2 style={{ fontSize: '20px', fontWeight: '600' }}>Import CSV</h2>
+          <button onClick={onClose} style={styles.closeButton}>✕</button>
+        </div>
+
+        {!result ? (
+          <>
+            <div
+              style={{
+                border: isDragging ? '2px dashed #4A6741' : '2px dashed #ccc',
+                borderRadius: '12px',
+                padding: '32px',
+                textAlign: 'center',
+                marginBottom: '20px',
+                background: isDragging ? '#f0f7ed' : '#fafafa',
+                cursor: 'pointer'
+              }}
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div style={{ fontSize: '48px', marginBottom: '12px' }}>📄</div>
+              <p style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+                Drag & drop CSV file here
+              </p>
+              <p style={{ fontSize: '12px', color: '#999' }}>or click to browse</p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                style={{ display: 'none' }}
+                onChange={handleFileSelect}
+              />
+            </div>
+
+            {csvText && (
+              <>
+                <div style={{ marginBottom: '16px' }}>
+                  <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px' }}>Preview (first 5 rows):</h3>
+                  <div style={{
+                    background: '#f8f9fa',
+                    padding: '12px',
+                    borderRadius: '8px',
+                    fontSize: '11px',
+                    fontFamily: 'monospace',
+                    overflowX: 'auto',
+                    maxHeight: '200px'
+                  }}>
+                    {previewRows.map((row, idx) => (
+                      <div key={idx} style={{ marginBottom: '4px', whiteSpace: 'nowrap' }}>
+                        {row}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  style={{ ...styles.primaryButton, width: '100%' }}
+                  onClick={handleImport}
+                  disabled={importing}
+                >
+                  {importing ? 'Importing...' : 'Import Payments'}
+                </button>
+              </>
+            )}
+          </>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '20px' }}>
+            {result.error ? (
+              <>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>❌</div>
+                <h3 style={{ fontSize: '18px', marginBottom: '8px', color: '#721c24' }}>Import Failed</h3>
+                <p style={{ color: '#666' }}>{result.error}</p>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div>
+                <h3 style={{ fontSize: '18px', marginBottom: '16px', color: '#155724' }}>Import Complete</h3>
+                
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, 1fr)',
+                  gap: '12px',
+                  textAlign: 'left'
+                }}>
+                  <div style={styles.resultItem}>
+                    <span style={styles.resultLabel}>Imported:</span>
+                    <span style={styles.resultValue}>{result.imported || 0}</span>
+                  </div>
+                  <div style={styles.resultItem}>
+                    <span style={styles.resultLabel}>Skipped:</span>
+                    <span style={styles.resultValue}>{result.skipped || 0}</span>
+                  </div>
+                  <div style={styles.resultItem}>
+                    <span style={styles.resultLabel}>Matched:</span>
+                    <span style={styles.resultValue}>{result.matched || 0}</span>
+                  </div>
+                  <div style={styles.resultItem}>
+                    <span style={styles.resultLabel}>Unmatched:</span>
+                    <span style={styles.resultValue}>{result.unmatched || 0}</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Payment Detail Modal
+function PaymentDetailModal({ payment, onClose }) {
+  const formatCurrency = (val) => {
+    const num = parseFloat(val) || 0;
+    return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modalContent, maxWidth: '500px' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h2 style={{ fontSize: '20px', fontWeight: '600' }}>Payment Details</h2>
+          <button onClick={onClose} style={styles.closeButton}>✕</button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div>
+            <div style={styles.detailLabel}>Patient</div>
+            <div style={styles.detailValue}>{payment.patient_name || '—'}</div>
+          </div>
+
+          <div>
+            <div style={styles.detailLabel}>Date</div>
+            <div style={styles.detailValue}>{payment.date}</div>
+          </div>
+
+          <div>
+            <div style={styles.detailLabel}>Description</div>
+            <div style={styles.detailValue}>{payment.description || '—'}</div>
+          </div>
+
+          <div>
+            <div style={styles.detailLabel}>Status</div>
+            <div style={styles.detailValue}>
+              <span style={{
+                display: 'inline-block',
+                padding: '6px 16px',
+                borderRadius: '12px',
+                fontSize: '14px',
+                fontWeight: '600',
+                background: payment.status === 'Paid' ? '#d4edda' : 
+                           payment.status === 'Sent' ? '#fff3cd' :
+                           payment.status === 'Canceled' ? '#f8d7da' : '#ffe5cc',
+                color: payment.status === 'Paid' ? '#155724' :
+                       payment.status === 'Sent' ? '#856404' :
+                       payment.status === 'Canceled' ? '#721c24' : '#8B4000'
+              }}>
+                {payment.status}
+              </span>
+            </div>
+          </div>
+
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: '12px',
+            padding: '16px',
+            background: '#f8f9fa',
+            borderRadius: '8px'
+          }}>
+            <div>
+              <div style={{ ...styles.detailLabel, fontSize: '11px' }}>Amount</div>
+              <div style={{ ...styles.detailValue, fontSize: '18px', fontWeight: '700', color: '#4A6741' }}>
+                {formatCurrency(payment.amount)}
+              </div>
+            </div>
+            
+            {payment.fees && (
+              <div>
+                <div style={{ ...styles.detailLabel, fontSize: '11px' }}>Fees</div>
+                <div style={{ ...styles.detailValue, fontSize: '18px', fontWeight: '600', color: '#999' }}>
+                  {formatCurrency(payment.fees)}
+                </div>
+              </div>
+            )}
+            
+            {payment.net && (
+              <div>
+                <div style={{ ...styles.detailLabel, fontSize: '11px' }}>Net</div>
+                <div style={{ ...styles.detailValue, fontSize: '18px', fontWeight: '700', color: '#333' }}>
+                  {formatCurrency(payment.net)}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {payment.notes && (
+            <div>
+              <div style={styles.detailLabel}>Notes</div>
+              <div style={{
+                ...styles.detailValue,
+                background: '#f8f9fa',
+                padding: '12px',
+                borderRadius: '8px',
+                fontSize: '13px'
+              }}>
+                {payment.notes}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Provider Bottom Nav
 function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
   const items = [
     { id: 'dashboard', icon: '🏠', label: 'Dashboard' },
     { id: 'patients', icon: '👥', label: 'Patients' },
+    { id: 'payments', icon: '💰', label: 'Payments' },
     { id: 'messages', icon: '💬', label: 'Messages' },
     { id: 'analytics', icon: '📊', label: 'Analytics' },
     { id: 'settings', icon: 'âš™️', label: 'Settings' },
@@ -16964,5 +17981,107 @@ const styles = {
     fontWeight: '600',
     color: '#4A6741',
     textDecoration: 'none',
+  },
+
+  // ==================== PAYMENTS STYLES ====================
+  paymentsCard: {
+    background: 'white',
+    borderRadius: '12px',
+    padding: '16px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+  },
+  paymentInput: {
+    width: '100%',
+    padding: '8px 12px',
+    borderRadius: '8px',
+    border: '1px solid #e0e0e0',
+    fontSize: '13px',
+    fontFamily: "'DM Sans', sans-serif",
+    outline: 'none',
+  },
+  tableHeader: {
+    padding: '12px',
+    textAlign: 'left',
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#666',
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  tableCell: {
+    padding: '12px',
+    fontSize: '13px',
+    color: '#333',
+  },
+  paginationBtn: {
+    padding: '8px 16px',
+    borderRadius: '8px',
+    border: '1px solid #e0e0e0',
+    background: 'white',
+    fontSize: '14px',
+    cursor: 'pointer',
+    color: '#333',
+  },
+  modalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: 'rgba(0,0,0,0.5)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+    padding: '20px',
+  },
+  modalContent: {
+    background: 'white',
+    borderRadius: '16px',
+    padding: '24px',
+    maxWidth: '90%',
+    width: '100%',
+  },
+  closeButton: {
+    background: 'none',
+    border: 'none',
+    fontSize: '24px',
+    cursor: 'pointer',
+    color: '#999',
+    padding: '0',
+    width: '32px',
+    height: '32px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  resultItem: {
+    background: '#f8f9fa',
+    padding: '12px',
+    borderRadius: '8px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  resultLabel: {
+    fontSize: '13px',
+    color: '#666',
+  },
+  resultValue: {
+    fontSize: '18px',
+    fontWeight: '700',
+    color: '#4A6741',
+  },
+  detailLabel: {
+    fontSize: '12px',
+    color: '#666',
+    marginBottom: '4px',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+  },
+  detailValue: {
+    fontSize: '15px',
+    color: '#333',
   },
 };
