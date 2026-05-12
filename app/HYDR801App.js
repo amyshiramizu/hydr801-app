@@ -2828,6 +2828,112 @@ function MacroCircle({ label, current, goal, color, unit = 'g' }) {
   );
 }
 
+// ==================== EXERCISE VIDEO LIBRARY ====================
+// YouTube embed IDs for common exercises. Used by both the FitnessHomeScreen
+// (for inline previews) and the WorkoutPlayer (for full demo videos).
+const EXERCISE_VIDEOS = {
+  // Beginner exercises
+  'wall push-ups': 'a6YHbXD2XlU',
+  'wall push-up': 'a6YHbXD2XlU',
+  'chair squats': 'MVKvgiM9vWQ',
+  'chair squat': 'MVKvgiM9vWQ',
+  'standing marches': 'bNskaOqYtb4',
+  'standing march': 'bNskaOqYtb4',
+  'arm circles': 'UJbIQxMVL6E',
+  'seated leg lifts': 'c4Ncm4ZsGzQ',
+  'wall slides': 'e_-tIeJG14g',
+  'calf raises': '-M4-G8p8fmc',
+  'calf raise': '-M4-G8p8fmc',
+  'walking': '6oDLnNtydPg',
+  'single leg stands': 'tu63smLW9o0',
+  'single leg stand': 'tu63smLW9o0',
+
+  // Intermediate exercises
+  'push-ups': 'IODxDxX7oi4',
+  'push-up': 'IODxDxX7oi4',
+  'pushups': 'IODxDxX7oi4',
+  'squats': 'aclHkVaku9U',
+  'squat': 'aclHkVaku9U',
+  'bodyweight squats': 'aclHkVaku9U',
+  'lunges': 'QOVaHwm-Q6U',
+  'lunge': 'QOVaHwm-Q6U',
+  'plank': 'pSHjTRCQxIw',
+  'planks': 'pSHjTRCQxIw',
+  'glute bridges': 'OUgsJ8-Vi0E',
+  'glute bridge': 'OUgsJ8-Vi0E',
+  'bird dogs': 'wiFNA3sqjCA',
+  'bird dog': 'wiFNA3sqjCA',
+  'mountain climbers': 'nmwgirgXLYM',
+  'mountain climber': 'nmwgirgXLYM',
+  'jumping jacks': 'c4DAnQ6DtF8',
+  'burpees': 'dZgVxmf6jkA',
+  'burpee': 'dZgVxmf6jkA',
+  'standing rows': 'xQNrFHEMhI4',
+  'standing row': 'xQNrFHEMhI4',
+
+  // Dumbbell exercises
+  'dumbbell rows': 'pYcpY20QaE8',
+  'dumbbell row': 'pYcpY20QaE8',
+  'bent over rows': 'pYcpY20QaE8',
+  'dumbbell press': 'VmB1G1K7v94',
+  'shoulder press': 'qEwKCR5JCog',
+  'bicep curls': 'ykJmrZ5v0Oo',
+  'bicep curl': 'ykJmrZ5v0Oo',
+  'tricep extensions': 'nRiJVZDpdL0',
+  'tricep extension': 'nRiJVZDpdL0',
+  'goblet squats': 'MeIiIdhvXT4',
+  'goblet squat': 'MeIiIdhvXT4',
+  'deadlifts': '1ZXobu7JvvE',
+  'deadlift': '1ZXobu7JvvE',
+  'romanian deadlifts': 'jEy_czb3RKA',
+  'lateral raises': '3VcKaXpzqRo',
+  'lateral raise': '3VcKaXpzqRo',
+
+  // Resistance band exercises
+  'band pull aparts': 'JObYtU7Y7ag',
+  'band pull apart': 'JObYtU7Y7ag',
+  'band rows': 'xQNrFHEMhI4',
+  'banded rows': 'xQNrFHEMhI4',
+  'banded row': 'xQNrFHEMhI4',
+  'band squats': 'ph3pddpKzzQ',
+
+  // Core exercises
+  'crunches': '5ER5Of4MOPI',
+  'crunch': '5ER5Of4MOPI',
+  'russian twists': 'wkD8rjkodUI',
+  'russian twist': 'wkD8rjkodUI',
+  'leg raises': 'JB2oyawG9KI',
+  'dead bugs': 'g_BYB0R-4Ts',
+  'dead bug': 'g_BYB0R-4Ts',
+  'side planks': 'K2VljzCC16g',
+  'side plank': 'K2VljzCC16g',
+
+  // Stretching
+  'cat cow': 'kqnua4rHVVA',
+  'cat-cow': 'kqnua4rHVVA',
+  'gentle stretching': 'sTxC3J3gQEU',
+  'hip flexor stretch': '0Y6hQrGR3nk',
+  'hamstring stretch': 'g-3Gorz5xEA',
+  'quad stretch': 'JllLD3uqXrg',
+  'shoulder stretch': 'SEdqd1n0cvg',
+  'child pose': '2MJvjzUafy8',
+  "child's pose": '2MJvjzUafy8',
+
+  // Default fallback
+  'default': 'IODxDxX7oi4'
+};
+
+function getExerciseVideoId(exerciseName) {
+  const name = (exerciseName || '').toLowerCase().trim();
+  if (!name) return EXERCISE_VIDEOS['default'];
+  if (EXERCISE_VIDEOS[name]) return EXERCISE_VIDEOS[name];
+  for (const [key, value] of Object.entries(EXERCISE_VIDEOS)) {
+    if (key === 'default') continue;
+    if (name.includes(key) || key.includes(name)) return value;
+  }
+  return EXERCISE_VIDEOS['default'];
+}
+
 // ==================== WORKOUT PLAYER ====================
 function WorkoutPlayer({ workout, user, onComplete, onExit }) {
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0);
@@ -2837,89 +2943,6 @@ function WorkoutPlayer({ workout, user, onComplete, onExit }) {
   const [isPaused, setIsPaused] = useState(false);
   const [showVideo, setShowVideo] = useState(true);
   const [workoutComplete, setWorkoutComplete] = useState(false);
-
-  // Exercise video database - YouTube embed IDs for common exercises
-  const exerciseVideos = {
-    // Beginner exercises
-    'wall push-ups': 'a6YHbXD2XlU',
-    'wall push-up': 'a6YHbXD2XlU',
-    'chair squats': 'MVKvgiM9vWQ',
-    'chair squat': 'MVKvgiM9vWQ',
-    'standing marches': 'bNskaOqYtb4',
-    'standing march': 'bNskaOqYtb4',
-    'arm circles': 'UJbIQxMVL6E',
-    'seated leg lifts': 'c4Ncm4ZsGzQ',
-    'wall slides': 'e_-tIeJG14g',
-    
-    // Intermediate exercises
-    'push-ups': 'IODxDxX7oi4',
-    'push-up': 'IODxDxX7oi4',
-    'pushups': 'IODxDxX7oi4',
-    'squats': 'aclHkVaku9U',
-    'squat': 'aclHkVaku9U',
-    'bodyweight squats': 'aclHkVaku9U',
-    'lunges': 'QOVaHwm-Q6U',
-    'lunge': 'QOVaHwm-Q6U',
-    'plank': 'pSHjTRCQxIw',
-    'planks': 'pSHjTRCQxIw',
-    'glute bridges': 'OUgsJ8-Vi0E',
-    'glute bridge': 'OUgsJ8-Vi0E',
-    'bird dogs': 'wiFNA3sqjCA',
-    'bird dog': 'wiFNA3sqjCA',
-    'mountain climbers': 'nmwgirgXLYM',
-    'mountain climber': 'nmwgirgXLYM',
-    'jumping jacks': 'c4DAnQ6DtF8',
-    'burpees': 'dZgVxmf6jkA',
-    'burpee': 'dZgVxmf6jkA',
-    
-    // Dumbbell exercises
-    'dumbbell rows': 'pYcpY20QaE8',
-    'dumbbell row': 'pYcpY20QaE8',
-    'bent over rows': 'pYcpY20QaE8',
-    'dumbbell press': 'VmB1G1K7v94',
-    'shoulder press': 'qEwKCR5JCog',
-    'bicep curls': 'ykJmrZ5v0Oo',
-    'bicep curl': 'ykJmrZ5v0Oo',
-    'tricep extensions': 'nRiJVZDpdL0',
-    'tricep extension': 'nRiJVZDpdL0',
-    'goblet squats': 'MeIiIdhvXT4',
-    'goblet squat': 'MeIiIdhvXT4',
-    'deadlifts': '1ZXobu7JvvE',
-    'deadlift': '1ZXobu7JvvE',
-    'romanian deadlifts': 'jEy_czb3RKA',
-    'lateral raises': '3VcKaXpzqRo',
-    'lateral raise': '3VcKaXpzqRo',
-    
-    // Resistance band exercises
-    'band pull aparts': 'JObYtU7Y7ag',
-    'band pull apart': 'JObYtU7Y7ag',
-    'band rows': 'xQNrFHEMhI4',
-    'band squats': 'ph3pddpKzzQ',
-    
-    // Core exercises
-    'crunches': '5ER5Of4MOPI',
-    'crunch': '5ER5Of4MOPI',
-    'russian twists': 'wkD8rjkodUI',
-    'russian twist': 'wkD8rjkodUI',
-    'leg raises': 'JB2oyawG9KI',
-    'dead bugs': 'g_BYB0R-4Ts',
-    'dead bug': 'g_BYB0R-4Ts',
-    'side planks': 'K2VljzCC16g',
-    'side plank': 'K2VljzCC16g',
-    
-    // Stretching
-    'cat cow': 'kqnua4rHVVA',
-    'cat-cow': 'kqnua4rHVVA',
-    'hip flexor stretch': '0Y6hQrGR3nk',
-    'hamstring stretch': 'g-3Gorz5xEA',
-    'quad stretch': 'JllLD3uqXrg',
-    'shoulder stretch': 'SEdqd1n0cvg',
-    'child pose': '2MJvjzUafy8',
-    "child's pose": '2MJvjzUafy8',
-    
-    // Default fallback
-    'default': 'IODxDxX7oi4'
-  };
 
   const exercises = workout?.exercises || [
     { name: 'Wall Push-ups', sets: 2, reps: 10, notes: 'Keep core engaged' },
@@ -2931,19 +2954,7 @@ function WorkoutPlayer({ workout, user, onComplete, onExit }) {
   const totalSets = parseInt(currentExercise?.sets) || 3;
   const reps = currentExercise?.reps || 10;
 
-  // Get video ID for current exercise
-  const getVideoId = (exerciseName) => {
-    const name = exerciseName?.toLowerCase() || '';
-    // Try exact match first
-    if (exerciseVideos[name]) return exerciseVideos[name];
-    // Try partial match
-    for (const [key, value] of Object.entries(exerciseVideos)) {
-      if (name.includes(key) || key.includes(name)) return value;
-    }
-    return exerciseVideos['default'];
-  };
-
-  const videoId = getVideoId(currentExercise?.name);
+  const videoId = getExerciseVideoId(currentExercise?.name);
 
   // Rest timer
   useEffect(() => {
@@ -5984,7 +5995,20 @@ Important considerations:
 - Include low-impact options
 - Emphasize consistency over intensity
 - Make it achievable and encouraging
-- If they have limited equipment, be creative with bodyweight variations`
+- If they have limited equipment, be creative with bodyweight variations
+
+CRITICAL — EXERCISE NAMING:
+The app shows a demo video for each exercise. Videos are matched by exact name, so you MUST choose names from the supported list below whenever possible. Use the exact spelling shown.
+
+Supported exercise names (pick from these):
+- Beginner / low-impact: Wall Push-ups, Chair Squats, Standing Marches, Arm Circles, Seated Leg Lifts, Wall Slides, Calf Raises, Walking, Single Leg Stands
+- Bodyweight strength: Push-ups, Squats, Bodyweight Squats, Lunges, Plank, Glute Bridges, Bird Dogs, Mountain Climbers, Jumping Jacks, Burpees, Standing Rows
+- Dumbbell: Dumbbell Rows, Bent Over Rows, Dumbbell Press, Shoulder Press, Bicep Curls, Tricep Extensions, Goblet Squats, Deadlifts, Romanian Deadlifts, Lateral Raises
+- Resistance band: Band Pull Aparts, Banded Rows, Band Squats
+- Core: Crunches, Russian Twists, Leg Raises, Dead Bugs, Side Planks
+- Stretching / mobility: Cat-Cow, Gentle Stretching, Hip Flexor Stretch, Hamstring Stretch, Quad Stretch, Shoulder Stretch, Child's Pose
+
+Only invent a new exercise name if nothing in the list fits. Prefer names from the list.`
           }]
         })
       });
@@ -6499,6 +6523,7 @@ function FitnessHomeScreen({ user }) {
     type: 'strength',
     exercises: []
   };
+  const [previewIndex, setPreviewIndex] = useState(null);
 
   return (
     <div style={styles.screenContent} className="fade-in">
@@ -6561,20 +6586,55 @@ function FitnessHomeScreen({ user }) {
       {todayWorkout.exercises?.length > 0 && (
         <section style={styles.section}>
           <h3 style={styles.sectionTitle}>Exercises</h3>
+          <p style={styles.exerciseListHint}>Tap any exercise to see how to do it</p>
           <div style={styles.exerciseList}>
-            {todayWorkout.exercises.map((ex, idx) => (
-              <div key={idx} style={styles.exerciseCard} className="card-hover">
-                <div style={styles.exerciseIndex}>{idx + 1}</div>
-                <div style={styles.exerciseDetails}>
-                  <h4 style={styles.exerciseTitle}>{ex.name}</h4>
-                  <p style={styles.exerciseMeta}>{ex.sets} sets × {ex.reps}</p>
-                  {ex.equipment && ex.equipment !== 'Bodyweight' && ex.equipment !== 'None' && (
-                    <p style={styles.exerciseEquipment}>🎒 {ex.equipment}</p>
+            {todayWorkout.exercises.map((ex, idx) => {
+              const videoId = getExerciseVideoId(ex.name);
+              const isOpen = previewIndex === idx;
+              return (
+                <div key={idx} style={styles.exerciseCard} className="card-hover">
+                  <div
+                    style={styles.exerciseCardRow}
+                    onClick={() => setPreviewIndex(isOpen ? null : idx)}
+                    role="button"
+                    aria-expanded={isOpen}
+                  >
+                    <div style={styles.exerciseThumb}>
+                      <img
+                        src={`https://img.youtube.com/vi/${videoId}/mqdefault.jpg`}
+                        alt={`${ex.name} demo`}
+                        style={styles.exerciseThumbImg}
+                        loading="lazy"
+                      />
+                      <div style={styles.exerciseThumbPlay}>▶</div>
+                    </div>
+                    <div style={styles.exerciseDetails}>
+                      <h4 style={styles.exerciseTitle}>
+                        <span style={styles.exerciseIndexInline}>{idx + 1}.</span> {ex.name}
+                      </h4>
+                      <p style={styles.exerciseMeta}>{ex.sets} sets × {ex.reps}</p>
+                      {ex.equipment && ex.equipment !== 'Bodyweight' && ex.equipment !== 'None' && (
+                        <p style={styles.exerciseEquipment}>🎒 {ex.equipment}</p>
+                      )}
+                      {ex.notes && <p style={styles.exerciseNotes}>{ex.notes}</p>}
+                    </div>
+                    <div style={styles.exerciseChevron}>{isOpen ? '▴' : '▾'}</div>
+                  </div>
+                  {isOpen && (
+                    <div style={styles.exercisePreviewVideo}>
+                      <iframe
+                        src={`https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1&playsinline=1&autoplay=1`}
+                        title={`${ex.name} demonstration`}
+                        style={styles.exercisePreviewIframe}
+                        frameBorder="0"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                      />
+                    </div>
                   )}
-                  {ex.notes && <p style={styles.exerciseNotes}>{ex.notes}</p>}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
@@ -12191,14 +12251,73 @@ const styles = {
     flexDirection: 'column',
     gap: '10px',
   },
+  exerciseListHint: {
+    fontSize: '12px',
+    color: '#8A8A8A',
+    margin: '0 0 10px 0',
+  },
   exerciseCard: {
     background: '#FFFFFF',
     borderRadius: '14px',
-    padding: '16px',
+    overflow: 'hidden',
+  },
+  exerciseCardRow: {
+    padding: '14px',
     display: 'flex',
     alignItems: 'flex-start',
     gap: '14px',
     cursor: 'pointer',
+  },
+  exerciseThumb: {
+    position: 'relative',
+    width: '88px',
+    height: '66px',
+    borderRadius: '10px',
+    overflow: 'hidden',
+    flexShrink: 0,
+    background: '#E8EDE6',
+  },
+  exerciseThumbImg: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    display: 'block',
+  },
+  exerciseThumbPlay: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: 'translate(-50%, -50%)',
+    width: '32px',
+    height: '32px',
+    borderRadius: '50%',
+    background: 'rgba(0,0,0,0.55)',
+    color: '#FFFFFF',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '12px',
+    paddingLeft: '2px',
+  },
+  exerciseChevron: {
+    color: '#9B9B9B',
+    fontSize: '14px',
+    paddingTop: '4px',
+    flexShrink: 0,
+  },
+  exercisePreviewVideo: {
+    position: 'relative',
+    width: '100%',
+    paddingBottom: '56.25%',
+    background: '#000',
+  },
+  exercisePreviewIframe: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    border: 0,
   },
   exerciseIndex: {
     width: '28px',
@@ -12213,8 +12332,14 @@ const styles = {
     color: '#4A6741',
     flexShrink: 0,
   },
+  exerciseIndexInline: {
+    color: '#4A6741',
+    fontWeight: '600',
+    marginRight: '4px',
+  },
   exerciseDetails: {
     flex: 1,
+    minWidth: 0,
   },
   exerciseTitle: {
     fontSize: '15px',
