@@ -1169,6 +1169,7 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 // Home Screen
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
+  const [showFoodLog, setShowFoodLog] = useState(false);
   
   const greeting = () => {
     const hour = new Date().getHours();
@@ -1210,6 +1211,10 @@ function HomeScreen({ user, setUser, setActiveModal }) {
 
   if (showInjectionTracker) {
     return <InjectionTrackerScreen user={user} setUser={setUser} onBack={() => setShowInjectionTracker(false)} />;
+  }
+
+  if (showFoodLog) {
+    return <FoodLogScreen user={user} onBack={() => setShowFoodLog(false)} />;
   }
 
   return (
@@ -1306,6 +1311,22 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             <div>
               <span style={styles.injectionStatusLabel}>Current Dose</span>
               <span style={styles.injectionStatusDose}>{user.medicationDose}</span>
+            </div>
+          </div>
+          <div style={styles.injectionStatusRight}>
+            <span style={styles.injectionStatusArrow}>→</span>
+          </div>
+        </div>
+      </section>
+
+      {/* Food Log */}
+      <section style={styles.section}>
+        <div style={styles.injectionStatusCard} onClick={() => setShowFoodLog(true)}>
+          <div style={styles.injectionStatusLeft}>
+            <span style={styles.injectionStatusIcon}>🍎</span>
+            <div>
+              <span style={styles.injectionStatusLabel}>Food Log</span>
+              <span style={styles.injectionStatusDose}>Search USDA & log meals</span>
             </div>
           </div>
           <div style={styles.injectionStatusRight}>
@@ -2263,6 +2284,7 @@ function MealPlanSetup({ user, onComplete, onCancel }) {
     { id: 'vegan', name: 'Vegan', icon: '🌱', desc: 'No animal products' },
     { id: 'keto', name: 'Keto', icon: '🥑', desc: 'Very low carb' },
     { id: 'mediterranean', name: 'Mediterranean', icon: '🫒', desc: 'Heart-healthy focus' },
+    { id: 'carnivore', name: 'Carnivore', icon: '🥩', desc: 'Meat & animal products only' },
   ];
 
   const allergyOptions = [
@@ -2575,7 +2597,10 @@ Make meals delicious, varied, and realistic to prepare. Include a mix of simple 
                 ...styles.mpOptionCard,
                 ...(preferences.dietType === diet.id ? styles.mpOptionCardSelected : {})
               }}
-              onClick={() => setPreferences({...preferences, dietType: diet.id})}
+              onClick={() => setPreferences({
+                ...preferences,
+                dietType: preferences.dietType === diet.id ? null : diet.id
+              })}
             >
               <span style={styles.mpOptionIcon}>{diet.icon}</span>
               <p style={styles.mpOptionName}>{diet.name}</p>
@@ -2696,7 +2721,10 @@ Make meals delicious, varied, and realistic to prepare. Include a mix of simple 
                 ...styles.mpCookingOption,
                 ...(preferences.cookingTime === option.id ? styles.mpCookingOptionSelected : {})
               }}
-              onClick={() => setPreferences({...preferences, cookingTime: option.id})}
+              onClick={() => setPreferences({
+                ...preferences,
+                cookingTime: preferences.cookingTime === option.id ? null : option.id
+              })}
             >
               <span style={styles.mpCookingIcon}>{option.icon}</span>
               <span style={styles.mpCookingName}>{option.name}</span>
@@ -9405,6 +9433,334 @@ function ExerciseIcon({ color = '#9B7E9B' }) {
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <path d="M4 10H16M2 7H4V13H2V7ZM16 7H18V13H16V7Z" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
     </svg>
+  );
+}
+
+// ==================== FOOD LOG (USDA FoodData Central) ====================
+const USDA_API_KEY = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_USDA_API_KEY) || 'DEMO_KEY';
+
+const todayKey = () => {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+const loadFoodLog = (dateKey) => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(`foodLog_${dateKey}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveFoodLog = (dateKey, entries) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`foodLog_${dateKey}`, JSON.stringify(entries));
+  } catch {}
+};
+
+// Pull cal/protein/carbs/fat from USDA foodNutrients (the API uses two slightly
+// different shapes depending on search vs detail endpoints, so check both).
+const extractNutrients = (food) => {
+  const out = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const nutrients = food?.foodNutrients || [];
+  for (const n of nutrients) {
+    const id = n.nutrientId ?? n.nutrient?.id;
+    const name = (n.nutrientName ?? n.nutrient?.name ?? '').toLowerCase();
+    const value = n.value ?? n.amount ?? 0;
+    if (id === 1008 || name.includes('energy')) out.calories = Math.round(value);
+    else if (id === 1003 || name === 'protein') out.protein = Math.round(value * 10) / 10;
+    else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
+    else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
+  }
+  return out;
+};
+
+function FoodLogScreen({ user, onBack }) {
+  const [dateKey] = useState(todayKey());
+  const [entries, setEntries] = useState([]);
+  const [showAdd, setShowAdd] = useState(null); // meal name to add to, or null
+
+  useEffect(() => {
+    setEntries(loadFoodLog(dateKey));
+  }, [dateKey]);
+
+  const persist = (next) => {
+    setEntries(next);
+    saveFoodLog(dateKey, next);
+  };
+
+  const totals = entries.reduce(
+    (acc, e) => {
+      acc.calories += e.calories * e.servings;
+      acc.protein += e.protein * e.servings;
+      acc.carbs += e.carbs * e.servings;
+      acc.fat += e.fat * e.servings;
+      return acc;
+    },
+    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+  );
+
+  const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
+
+  const addEntry = (mealName, food) => {
+    const next = [...entries, { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` }];
+    persist(next);
+    setShowAdd(null);
+  };
+
+  const removeEntry = (id) => {
+    persist(entries.filter(e => e.id !== id));
+  };
+
+  return (
+    <div style={styles.screenContent} className="fade-in">
+      <header style={styles.pageHeader}>
+        <button style={styles.backButton} onClick={onBack}>← Back</button>
+        <h1 style={styles.pageTitle}>Food Log</h1>
+        <p style={styles.pageSubtitle}>{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+      </header>
+
+      <div style={styles.foodLogTotalsCard}>
+        <div style={styles.foodLogTotalRow}>
+          <div style={styles.foodLogTotalMain}>
+            <span style={styles.foodLogTotalValue}>{Math.round(totals.calories)}</span>
+            <span style={styles.foodLogTotalLabel}>calories today</span>
+          </div>
+        </div>
+        <div style={styles.foodLogMacroRow}>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: '#4A6741'}}>{Math.round(totals.protein)}g</span>
+            <span style={styles.foodLogMacroLabel}>Protein</span>
+          </div>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: '#C4956A'}}>{Math.round(totals.carbs)}g</span>
+            <span style={styles.foodLogMacroLabel}>Carbs</span>
+          </div>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: '#9B7E9B'}}>{Math.round(totals.fat)}g</span>
+            <span style={styles.foodLogMacroLabel}>Fat</span>
+          </div>
+        </div>
+      </div>
+
+      {meals.map(meal => {
+        const mealEntries = entries.filter(e => e.meal === meal);
+        const mealCals = mealEntries.reduce((s, e) => s + e.calories * e.servings, 0);
+        return (
+          <section key={meal} style={styles.section}>
+            <div style={styles.foodLogMealHeader}>
+              <h3 style={styles.sectionTitle}>{meal}</h3>
+              <span style={styles.foodLogMealCals}>{Math.round(mealCals)} cal</span>
+            </div>
+            <div style={styles.foodLogEntries}>
+              {mealEntries.map(entry => (
+                <div key={entry.id} style={styles.foodLogEntry}>
+                  <div style={styles.foodLogEntryMain}>
+                    <p style={styles.foodLogEntryName}>{entry.name}</p>
+                    <p style={styles.foodLogEntryMeta}>
+                      {entry.servings} × {entry.servingLabel} · {Math.round(entry.calories * entry.servings)} cal · P {Math.round(entry.protein * entry.servings)}g · C {Math.round(entry.carbs * entry.servings)}g · F {Math.round(entry.fat * entry.servings)}g
+                    </p>
+                  </div>
+                  <button style={styles.foodLogEntryRemove} onClick={() => removeEntry(entry.id)} aria-label="Remove">×</button>
+                </div>
+              ))}
+              <button style={styles.foodLogAddBtn} onClick={() => setShowAdd(meal)}>
+                + Add food
+              </button>
+            </div>
+          </section>
+        );
+      })}
+
+      {showAdd && (
+        <AddFoodModal
+          meal={showAdd}
+          onClose={() => setShowAdd(null)}
+          onAdd={(food) => addEntry(showAdd, food)}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddFoodModal({ meal, onClose, onAdd }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [servings, setServings] = useState('1');
+  const [showCustom, setShowCustom] = useState(false);
+  const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
+  const searchTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults([]);
+      setError(null);
+      return;
+    }
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_API_KEY}&query=${encodeURIComponent(query)}&pageSize=25&dataType=Foundation,SR%20Legacy,Branded,Survey%20%28FNDDS%29`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`USDA returned ${res.status}`);
+        const data = await res.json();
+        setResults(data.foods || []);
+      } catch (e) {
+        setError('Could not reach USDA food database. Try again or add a custom food.');
+        setResults([]);
+      } finally {
+        setLoading(false);
+      }
+    }, 350);
+    return () => searchTimeoutRef.current && clearTimeout(searchTimeoutRef.current);
+  }, [query]);
+
+  const handlePickResult = (food) => {
+    const macros = extractNutrients(food);
+    const isBranded = food.dataType === 'Branded';
+    const servingSize = food.servingSize;
+    const servingUnit = food.servingSizeUnit;
+    let perServing = macros;
+    let servingLabel = '100 g';
+    // USDA nutrients on Foundation/SR Legacy are per 100g; Branded usually per 100g too but they include servingSize.
+    if (isBranded && servingSize && servingUnit) {
+      const factor = servingSize / 100;
+      perServing = {
+        calories: Math.round(macros.calories * factor),
+        protein: Math.round(macros.protein * factor * 10) / 10,
+        carbs: Math.round(macros.carbs * factor * 10) / 10,
+        fat: Math.round(macros.fat * factor * 10) / 10,
+      };
+      servingLabel = `${servingSize} ${servingUnit}`;
+    }
+    setSelected({
+      name: food.description + (food.brandName ? ` (${food.brandName})` : ''),
+      servingLabel,
+      ...perServing,
+    });
+    setServings('1');
+  };
+
+  const confirmAdd = () => {
+    const n = parseFloat(servings) || 1;
+    onAdd({ ...selected, servings: n });
+  };
+
+  const submitCustom = () => {
+    if (!custom.name.trim()) return;
+    onAdd({
+      name: custom.name.trim(),
+      servingLabel: custom.servingLabel || '1 serving',
+      calories: parseFloat(custom.calories) || 0,
+      protein: parseFloat(custom.protein) || 0,
+      carbs: parseFloat(custom.carbs) || 0,
+      fat: parseFloat(custom.fat) || 0,
+      servings: 1,
+    });
+  };
+
+  return (
+    <div style={styles.foodModalBackdrop} onClick={onClose}>
+      <div style={styles.foodModal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.foodModalHeader}>
+          <h2 style={styles.foodModalTitle}>Add to {meal}</h2>
+          <button style={styles.foodModalClose} onClick={onClose}>×</button>
+        </div>
+
+        {selected ? (
+          <div style={styles.foodModalBody}>
+            <p style={styles.foodModalSelectedName}>{selected.name}</p>
+            <p style={styles.foodModalSelectedServing}>Per {selected.servingLabel}: {selected.calories} cal · P {selected.protein}g · C {selected.carbs}g · F {selected.fat}g</p>
+            <label style={styles.foodModalLabel}>Servings</label>
+            <input
+              type="number"
+              step="0.5"
+              min="0.25"
+              value={servings}
+              onChange={(e) => setServings(e.target.value)}
+              style={styles.foodModalInput}
+            />
+            <div style={styles.foodModalTotalRow}>
+              <span style={styles.foodModalTotalLabel}>Total</span>
+              <span style={styles.foodModalTotalValue}>
+                {Math.round(selected.calories * (parseFloat(servings) || 1))} cal
+              </span>
+            </div>
+            <button style={styles.primaryButton} onClick={confirmAdd}>Add to {meal}</button>
+            <button style={styles.secondaryButton} onClick={() => setSelected(null)}>← Back to search</button>
+          </div>
+        ) : showCustom ? (
+          <div style={styles.foodModalBody}>
+            <label style={styles.foodModalLabel}>Food name</label>
+            <input style={styles.foodModalInput} value={custom.name} onChange={(e) => setCustom({...custom, name: e.target.value})} placeholder="Homemade chicken bowl" />
+            <label style={styles.foodModalLabel}>Serving size label</label>
+            <input style={styles.foodModalInput} value={custom.servingLabel} onChange={(e) => setCustom({...custom, servingLabel: e.target.value})} placeholder="1 cup" />
+            <div style={styles.foodModalMacroGrid}>
+              <div>
+                <label style={styles.foodModalLabel}>Calories</label>
+                <input style={styles.foodModalInput} type="number" value={custom.calories} onChange={(e) => setCustom({...custom, calories: e.target.value})} />
+              </div>
+              <div>
+                <label style={styles.foodModalLabel}>Protein (g)</label>
+                <input style={styles.foodModalInput} type="number" value={custom.protein} onChange={(e) => setCustom({...custom, protein: e.target.value})} />
+              </div>
+              <div>
+                <label style={styles.foodModalLabel}>Carbs (g)</label>
+                <input style={styles.foodModalInput} type="number" value={custom.carbs} onChange={(e) => setCustom({...custom, carbs: e.target.value})} />
+              </div>
+              <div>
+                <label style={styles.foodModalLabel}>Fat (g)</label>
+                <input style={styles.foodModalInput} type="number" value={custom.fat} onChange={(e) => setCustom({...custom, fat: e.target.value})} />
+              </div>
+            </div>
+            <button style={styles.primaryButton} onClick={submitCustom} disabled={!custom.name.trim()}>Add to {meal}</button>
+            <button style={styles.secondaryButton} onClick={() => setShowCustom(false)}>← Back to search</button>
+          </div>
+        ) : (
+          <div style={styles.foodModalBody}>
+            <input
+              autoFocus
+              type="text"
+              placeholder="Search foods (e.g., chicken breast, banana)"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={styles.foodModalInput}
+            />
+            {loading && <p style={styles.foodModalHint}>Searching USDA database…</p>}
+            {error && <p style={styles.foodModalError}>{error}</p>}
+            <div style={styles.foodResultsList}>
+              {results.map((food) => {
+                const macros = extractNutrients(food);
+                return (
+                  <button key={food.fdcId} style={styles.foodResultItem} onClick={() => handlePickResult(food)}>
+                    <span style={styles.foodResultName}>{food.description}</span>
+                    {food.brandName && <span style={styles.foodResultBrand}>{food.brandName}</span>}
+                    <span style={styles.foodResultMacros}>
+                      {macros.calories} cal · P {macros.protein}g · C {macros.carbs}g · F {macros.fat}g <span style={styles.foodResultPer}>per 100g</span>
+                    </span>
+                  </button>
+                );
+              })}
+              {!loading && query.trim() && results.length === 0 && !error && (
+                <p style={styles.foodModalHint}>No matches found.</p>
+              )}
+            </div>
+            <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -17089,5 +17445,279 @@ const styles = {
     fontWeight: '600',
     color: '#4A6741',
     textDecoration: 'none',
+  },
+
+  // Food Log
+  foodLogTotalsCard: {
+    background: 'linear-gradient(135deg, #4A6741 0%, #5B7B50 100%)',
+    color: '#FFFFFF',
+    borderRadius: '20px',
+    padding: '20px',
+    marginBottom: '20px',
+  },
+  foodLogTotalRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    marginBottom: '14px',
+  },
+  foodLogTotalMain: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+  },
+  foodLogTotalValue: {
+    fontFamily: "'Fraunces', serif",
+    fontSize: '40px',
+    fontWeight: '600',
+    lineHeight: 1,
+  },
+  foodLogTotalLabel: {
+    fontSize: '12px',
+    opacity: 0.85,
+    textTransform: 'uppercase',
+    letterSpacing: '1px',
+    marginTop: '6px',
+  },
+  foodLogMacroRow: {
+    display: 'flex',
+    justifyContent: 'space-around',
+    background: 'rgba(255,255,255,0.12)',
+    borderRadius: '14px',
+    padding: '12px',
+  },
+  foodLogMacroItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+  },
+  foodLogMacroValue: {
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  foodLogMacroLabel: {
+    fontSize: '11px',
+    color: 'rgba(255,255,255,0.85)',
+    marginTop: '2px',
+  },
+  foodLogMealHeader: {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginBottom: '10px',
+  },
+  foodLogMealCals: {
+    fontSize: '13px',
+    color: '#6B6B6B',
+    fontWeight: '500',
+  },
+  foodLogEntries: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  foodLogEntry: {
+    background: '#FFFFFF',
+    borderRadius: '14px',
+    padding: '12px 14px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  foodLogEntryMain: {
+    flex: 1,
+    minWidth: 0,
+  },
+  foodLogEntryName: {
+    fontSize: '14px',
+    fontWeight: '500',
+    color: '#2D2D2D',
+    margin: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  foodLogEntryMeta: {
+    fontSize: '11px',
+    color: '#8A8A8A',
+    margin: '4px 0 0 0',
+  },
+  foodLogEntryRemove: {
+    width: '28px',
+    height: '28px',
+    borderRadius: '14px',
+    background: '#F5F4F2',
+    border: 'none',
+    color: '#9B9B9B',
+    fontSize: '18px',
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
+  foodLogAddBtn: {
+    background: 'transparent',
+    border: '1.5px dashed #B8C2B0',
+    borderRadius: '14px',
+    color: '#4A6741',
+    padding: '12px',
+    fontSize: '14px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    marginTop: '4px',
+  },
+
+  // Add Food Modal
+  foodModalBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.55)',
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    zIndex: 1000,
+    padding: '0',
+  },
+  foodModal: {
+    background: '#F5F4F2',
+    width: '100%',
+    maxWidth: '480px',
+    maxHeight: '90vh',
+    borderTopLeftRadius: '24px',
+    borderTopRightRadius: '24px',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  foodModalHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '18px 20px',
+    borderBottom: '1px solid #E8E5DF',
+    background: '#FFFFFF',
+  },
+  foodModalTitle: {
+    fontFamily: "'Fraunces', serif",
+    fontSize: '20px',
+    fontWeight: '600',
+    color: '#2D2D2D',
+    margin: 0,
+  },
+  foodModalClose: {
+    background: 'transparent',
+    border: 'none',
+    fontSize: '28px',
+    color: '#9B9B9B',
+    cursor: 'pointer',
+    lineHeight: 1,
+    padding: '0 4px',
+  },
+  foodModalBody: {
+    padding: '16px 20px 24px 20px',
+    overflowY: 'auto',
+    flex: 1,
+  },
+  foodModalLabel: {
+    display: 'block',
+    fontSize: '12px',
+    color: '#6B6B6B',
+    fontWeight: '500',
+    marginBottom: '6px',
+    marginTop: '10px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+  },
+  foodModalInput: {
+    width: '100%',
+    padding: '12px 14px',
+    borderRadius: '12px',
+    border: '1px solid #D8D4CC',
+    background: '#FFFFFF',
+    fontSize: '15px',
+    color: '#2D2D2D',
+    outline: 'none',
+    boxSizing: 'border-box',
+  },
+  foodModalHint: {
+    fontSize: '13px',
+    color: '#8A8A8A',
+    margin: '12px 0',
+    textAlign: 'center',
+  },
+  foodModalError: {
+    fontSize: '13px',
+    color: '#B85C5C',
+    margin: '12px 0',
+  },
+  foodResultsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    margin: '12px 0',
+  },
+  foodResultItem: {
+    background: '#FFFFFF',
+    border: '1px solid #E8E5DF',
+    borderRadius: '12px',
+    padding: '12px 14px',
+    textAlign: 'left',
+    cursor: 'pointer',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  foodResultName: {
+    fontSize: '14px',
+    fontWeight: '500',
+    color: '#2D2D2D',
+  },
+  foodResultBrand: {
+    fontSize: '12px',
+    color: '#8A8A8A',
+  },
+  foodResultMacros: {
+    fontSize: '12px',
+    color: '#4A6741',
+    fontWeight: '500',
+  },
+  foodResultPer: {
+    color: '#9B9B9B',
+    fontWeight: '400',
+    marginLeft: '4px',
+  },
+  foodModalSelectedName: {
+    fontSize: '16px',
+    fontWeight: '600',
+    color: '#2D2D2D',
+    margin: '0 0 4px 0',
+  },
+  foodModalSelectedServing: {
+    fontSize: '12px',
+    color: '#6B6B6B',
+    margin: '0 0 4px 0',
+  },
+  foodModalTotalRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    background: '#FFFFFF',
+    border: '1px solid #E8E5DF',
+    borderRadius: '12px',
+    padding: '12px 14px',
+    margin: '14px 0',
+  },
+  foodModalTotalLabel: {
+    fontSize: '13px',
+    color: '#6B6B6B',
+  },
+  foodModalTotalValue: {
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#4A6741',
+  },
+  foodModalMacroGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '10px',
   },
 };
