@@ -9437,7 +9437,9 @@ function ExerciseIcon({ color = '#9B7E9B' }) {
 }
 
 // ==================== FOOD LOG (USDA FoodData Central) ====================
-const USDA_API_KEY = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_USDA_API_KEY) || 'DEMO_KEY';
+// Next.js inlines `process.env.NEXT_PUBLIC_*` at build time, so this becomes
+// either the literal key string or `undefined` in the client bundle.
+const USDA_API_KEY = process.env.NEXT_PUBLIC_USDA_API_KEY || 'DEMO_KEY';
 
 const todayKey = () => {
   const d = new Date();
