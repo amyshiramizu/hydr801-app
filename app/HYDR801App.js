@@ -1326,7 +1326,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             <span style={styles.injectionStatusIcon}>🍎</span>
             <div>
               <span style={styles.injectionStatusLabel}>Food Log</span>
-              <span style={styles.injectionStatusDose}>Search USDA & log meals</span>
+              <span style={styles.injectionStatusDose}>Log what you ate today</span>
             </div>
           </div>
           <div style={styles.injectionStatusRight}>
