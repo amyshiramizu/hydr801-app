@@ -9611,13 +9611,21 @@ function AddFoodModal({ meal, onClose, onAdd }) {
       setLoading(true);
       setError(null);
       try {
-        const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_API_KEY}&query=${encodeURIComponent(query)}&pageSize=25&dataType=Foundation,SR%20Legacy,Branded,Survey%20%28FNDDS%29`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`USDA returned ${res.status}`);
+        const params = new URLSearchParams();
+        params.append('api_key', USDA_API_KEY);
+        params.append('query', query);
+        params.append('pageSize', '25');
+        ['Foundation', 'SR Legacy', 'Survey (FNDDS)', 'Branded'].forEach(t => params.append('dataType', t));
+        const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${params.toString()}`);
+        if (!res.ok) {
+          const body = await res.text().catch(() => '');
+          throw new Error(`USDA ${res.status}: ${body.slice(0, 120)}`);
+        }
         const data = await res.json();
         setResults(data.foods || []);
       } catch (e) {
-        setError('Could not reach USDA food database. Try again or add a custom food.');
+        console.error('USDA search failed:', e);
+        setError('Could not reach the USDA food database. Try again or add a custom food.');
         setResults([]);
       } finally {
         setLoading(false);
@@ -17572,21 +17580,22 @@ const styles = {
     inset: 0,
     background: 'rgba(0,0,0,0.55)',
     display: 'flex',
-    alignItems: 'flex-end',
+    alignItems: 'stretch',
     justifyContent: 'center',
-    zIndex: 1000,
+    zIndex: 9999,
     padding: '0',
   },
   foodModal: {
     background: '#F5F4F2',
     width: '100%',
     maxWidth: '480px',
-    maxHeight: '90vh',
+    height: '100%',
     borderTopLeftRadius: '24px',
     borderTopRightRadius: '24px',
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
+    marginTop: 'env(safe-area-inset-top, 24px)',
   },
   foodModalHeader: {
     display: 'flex',
