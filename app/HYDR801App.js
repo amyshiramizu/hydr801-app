@@ -2861,20 +2861,22 @@ function MacroCircle({ label, current, goal, color, unit = 'g' }) {
 // (for inline previews) and the WorkoutPlayer (for full demo videos).
 const EXERCISE_VIDEOS = {
   // Beginner exercises
-  'wall push-ups': 'a6YHbXD2XlU',
-  'wall push-up': 'a6YHbXD2XlU',
-  'chair squats': 'MVKvgiM9vWQ',
-  'chair squat': 'MVKvgiM9vWQ',
-  'standing marches': 'bNskaOqYtb4',
-  'standing march': 'bNskaOqYtb4',
-  'arm circles': 'UJbIQxMVL6E',
-  'seated leg lifts': 'c4Ncm4ZsGzQ',
-  'wall slides': 'e_-tIeJG14g',
+  'wall push-ups': '8LCCE-nNaUs',
+  'wall push-up': '8LCCE-nNaUs',
+  'chair squats': 'Z09h_OcV0YU',
+  'chair squat': 'Z09h_OcV0YU',
+  'standing marches': 'shdbEBpDUTk',
+  'standing march': 'shdbEBpDUTk',
+  'arm circles': 'lzR7tzI1JUI',
+  'seated leg lifts': 'oxtaZ9UPem4',
+  'seated leg lift': 'oxtaZ9UPem4',
+  'wall slides': 'i_0zLUcE-zk',
+  'wall slide': 'i_0zLUcE-zk',
   'calf raises': '-M4-G8p8fmc',
   'calf raise': '-M4-G8p8fmc',
-  'walking': '6oDLnNtydPg',
-  'single leg stands': 'tu63smLW9o0',
-  'single leg stand': 'tu63smLW9o0',
+  'walking': 'yoUNJm-Fvtc',
+  'single leg stands': '7SF7AYh2_Yw',
+  'single leg stand': '7SF7AYh2_Yw',
 
   // Intermediate exercises
   'push-ups': 'IODxDxX7oi4',
@@ -2923,7 +2925,8 @@ const EXERCISE_VIDEOS = {
   'band rows': 'xQNrFHEMhI4',
   'banded rows': 'xQNrFHEMhI4',
   'banded row': 'xQNrFHEMhI4',
-  'band squats': 'ph3pddpKzzQ',
+  'band squats': '6rE0IYlMPZA',
+  'band squat': '6rE0IYlMPZA',
 
   // Core exercises
   'crunches': '5ER5Of4MOPI',
@@ -2931,8 +2934,8 @@ const EXERCISE_VIDEOS = {
   'russian twists': 'wkD8rjkodUI',
   'russian twist': 'wkD8rjkodUI',
   'leg raises': 'JB2oyawG9KI',
-  'dead bugs': 'g_BYB0R-4Ts',
-  'dead bug': 'g_BYB0R-4Ts',
+  'dead bugs': 'o4GKiEoYClI',
+  'dead bug': 'o4GKiEoYClI',
   'side planks': 'K2VljzCC16g',
   'side plank': 'K2VljzCC16g',
 
@@ -2940,12 +2943,13 @@ const EXERCISE_VIDEOS = {
   'cat cow': 'kqnua4rHVVA',
   'cat-cow': 'kqnua4rHVVA',
   'gentle stretching': 'sTxC3J3gQEU',
-  'hip flexor stretch': '0Y6hQrGR3nk',
-  'hamstring stretch': 'g-3Gorz5xEA',
-  'quad stretch': 'JllLD3uqXrg',
+  'hip flexor stretch': 'ktgtEWGhFd8',
+  'hamstring stretch': 'YIJndOqIcLU',
+  'quad stretch': 'aNXGOpP37CY',
   'shoulder stretch': 'SEdqd1n0cvg',
-  'child pose': '2MJvjzUafy8',
-  "child's pose": '2MJvjzUafy8',
+  'child pose': 'EniGBCHAEVQ',
+  "child's pose": 'EniGBCHAEVQ',
+  'childs pose': 'EniGBCHAEVQ',
 
   // Default fallback
   'default': 'IODxDxX7oi4'
@@ -6633,6 +6637,19 @@ function FitnessHomeScreen({ user }) {
                         alt={`${ex.name} demo`}
                         style={styles.exerciseThumbImg}
                         loading="lazy"
+                        onError={(e) => {
+                          if (videoId !== EXERCISE_VIDEOS['default']) {
+                            e.target.src = `https://img.youtube.com/vi/${EXERCISE_VIDEOS['default']}/mqdefault.jpg`;
+                          }
+                        }}
+                        onLoad={(e) => {
+                          // YouTube returns a 1.1KB "video unavailable" image for
+                          // dead videos with a 200 status, so onError won't fire.
+                          // Detect the placeholder by its tiny natural dimensions.
+                          if (e.target.naturalWidth > 0 && e.target.naturalWidth < 200 && videoId !== EXERCISE_VIDEOS['default']) {
+                            e.target.src = `https://img.youtube.com/vi/${EXERCISE_VIDEOS['default']}/mqdefault.jpg`;
+                          }
+                        }}
                       />
                       <div style={styles.exerciseThumbPlay}>▶</div>
                     </div>
