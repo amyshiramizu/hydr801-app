@@ -1,11 +1,107 @@
 'use client';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+
+// ==================== TOAST SYSTEM ====================
+// Lightweight in-app toast for surfacing async errors and confirmations
+// to patients (instead of swallowing them in console.error).
+const ToastContext = React.createContext({
+  show: () => {}, success: () => {}, error: () => {}, info: () => {},
+});
+const useToast = () => React.useContext(ToastContext);
+
+function Toast({ toast, onClose }) {
+  useEffect(() => {
+    if (!toast) return;
+    const ms = toast.type === 'error' ? 6000 : 3500;
+    const t = setTimeout(onClose, ms);
+    return () => clearTimeout(t);
+  }, [toast, onClose]);
+
+  if (!toast) return null;
+  const palette = {
+    error:   { bg: '#FDECEC', border: '#E5A5A5', color: '#8C2A2A', icon: '⚠️' },
+    success: { bg: '#E8F1E4', border: '#A4C49A', color: '#3C5A33', icon: '✓' },
+    info:    { bg: '#E8EFF4', border: '#A0BCD0', color: '#2D4D63', icon: 'ℹ️' },
+  }[toast.type] || { bg: '#FFFFFF', border: '#D8D4CC', color: '#2D2D2D', icon: '' };
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'fixed',
+        top: 'env(safe-area-inset-top, 16px)',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: palette.bg,
+        color: palette.color,
+        border: `1px solid ${palette.border}`,
+        borderRadius: '12px',
+        padding: '12px 16px',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
+        zIndex: 10000,
+        maxWidth: '380px',
+        width: 'calc(100% - 32px)',
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: '10px',
+        fontSize: '14px',
+        fontWeight: 500,
+        lineHeight: 1.4,
+      }}
+    >
+      <span style={{ fontSize: '16px', lineHeight: 1.2 }}>{palette.icon}</span>
+      <span style={{ flex: 1, whiteSpace: 'pre-line' }}>{toast.message}</span>
+      <button
+        aria-label="Dismiss"
+        onClick={onClose}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          color: palette.color,
+          fontSize: '18px',
+          lineHeight: 1,
+          cursor: 'pointer',
+          padding: '0 0 0 4px',
+        }}
+      >×</button>
+    </div>
+  );
+}
+
+// ==================== LOCAL STORAGE PERSISTENCE ====================
+// Patient-entered data (weight, food, injection notes) lives in React state.
+// Without persistence, a tab refresh wipes everything — a real trust-killer
+// for a wellness app. We hydrate on mount and save on every user change.
+const STORAGE_USER_KEY = 'hydr801_user_v1';
+const STORAGE_ONBOARDING_KEY = 'hydr801_onboarding_complete_v1';
+
+function loadStoredUser() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredUser(user) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(STORAGE_USER_KEY, JSON.stringify(user));
+  } catch {
+    // Quota exceeded or storage disabled — fail silently
+  }
+}
 
 // App Component
 export default function HYDR801App() {
   const [appMode, setAppMode] = useState('patient'); // 'patient' or 'provider'
   const [currentScreen, setCurrentScreen] = useState('home');
   const [showOnboarding, setShowOnboarding] = useState(true);
+  const [hydrated, setHydrated] = useState(false);
+  const [toast, setToast] = useState(null);
   const [user, setUser] = useState({
     id: 'patient_001',
     name: 'Sarah',
@@ -108,6 +204,50 @@ export default function HYDR801App() {
   });
   const [activeModal, setActiveModal] = useState(null);
 
+  // Hydrate user state and onboarding from localStorage on mount.
+  // Done in an effect (not lazy initializer) so SSR markup matches the
+  // initial client render and React doesn't throw a hydration mismatch.
+  useEffect(() => {
+    const stored = loadStoredUser();
+    if (stored && typeof stored === 'object') {
+      setUser((prev) => ({ ...prev, ...stored }));
+    }
+    try {
+      if (window.localStorage.getItem(STORAGE_ONBOARDING_KEY) === 'true') {
+        setShowOnboarding(false);
+      }
+    } catch {
+      // localStorage unavailable
+    }
+    setHydrated(true);
+  }, []);
+
+  // Persist user state on every change, but only after initial hydration
+  // so we don't immediately overwrite stored data with the default user.
+  useEffect(() => {
+    if (!hydrated) return;
+    saveStoredUser(user);
+  }, [user, hydrated]);
+
+  const completeOnboarding = useCallback(() => {
+    setShowOnboarding(false);
+    try {
+      window.localStorage.setItem(STORAGE_ONBOARDING_KEY, 'true');
+    } catch {
+      // localStorage unavailable
+    }
+  }, []);
+
+  const toastApi = useMemo(() => {
+    const show = (message, type = 'info') => setToast({ message, type, id: Date.now() });
+    return {
+      show,
+      success: (m) => show(m, 'success'),
+      error: (m) => show(m, 'error'),
+      info: (m) => show(m, 'info'),
+    };
+  }, []);
+
   // Mock patients for provider view
   const [patients] = useState([
     { ...user },
@@ -188,12 +328,15 @@ export default function HYDR801App() {
   // Onboarding flow
   if (showOnboarding && appMode === 'patient') {
     return (
-      <div style={styles.appContainer}>
-        <style>{globalStyles}</style>
-        <div style={styles.phoneFrame}>
-          <OnboardingFlow onComplete={() => setShowOnboarding(false)} />
+      <ToastContext.Provider value={toastApi}>
+        <div style={styles.appContainer}>
+          <style>{globalStyles}</style>
+          <div style={styles.phoneFrame}>
+            <OnboardingFlow onComplete={completeOnboarding} />
+          </div>
+          <Toast toast={toast} onClose={() => setToast(null)} />
         </div>
-      </div>
+      </ToastContext.Provider>
     );
   }
 
@@ -214,40 +357,44 @@ export default function HYDR801App() {
   };
 
   return (
-    <div style={styles.appContainer}>
-      <style>{globalStyles}</style>
-      
-      {/* Mode Toggle (for demo purposes) */}
-      <div style={styles.modeToggle}>
-        <button 
-          style={{...styles.modeBtn, ...(appMode === 'patient' ? styles.modeBtnActive : {})}}
-          onClick={() => { setAppMode('patient'); setCurrentScreen('home'); }}
-        >
-          👤 Patient View
-        </button>
-        <button 
-          style={{...styles.modeBtn, ...(appMode === 'provider' ? styles.modeBtnActive : {})}}
-          onClick={() => { setAppMode('provider'); setCurrentScreen('dashboard'); }}
-        >
-          🩺 Provider View
-        </button>
-      </div>
-      
-      <div style={styles.phoneFrame}>
-        <div style={styles.screen}>
-          {appMode === 'patient' ? patientScreens[currentScreen] : providerScreens[currentScreen]}
+    <ToastContext.Provider value={toastApi}>
+      <div style={styles.appContainer}>
+        <style>{globalStyles}</style>
+
+        {/* Mode Toggle (for demo purposes) */}
+        <div style={styles.modeToggle}>
+          <button
+            style={{...styles.modeBtn, ...(appMode === 'patient' ? styles.modeBtnActive : {})}}
+            onClick={() => { setAppMode('patient'); setCurrentScreen('home'); }}
+          >
+            👤 Patient View
+          </button>
+          <button
+            style={{...styles.modeBtn, ...(appMode === 'provider' ? styles.modeBtnActive : {})}}
+            onClick={() => { setAppMode('provider'); setCurrentScreen('dashboard'); }}
+          >
+            🩺 Provider View
+          </button>
         </div>
-        {appMode === 'patient' ? (
-          <BottomNav currentScreen={currentScreen} setCurrentScreen={setCurrentScreen} />
-        ) : (
-          <ProviderBottomNav currentScreen={currentScreen} setCurrentScreen={setCurrentScreen} />
+
+        <div style={styles.phoneFrame}>
+          <div style={styles.screen}>
+            {appMode === 'patient' ? patientScreens[currentScreen] : providerScreens[currentScreen]}
+          </div>
+          {appMode === 'patient' ? (
+            <BottomNav currentScreen={currentScreen} setCurrentScreen={setCurrentScreen} />
+          ) : (
+            <ProviderBottomNav currentScreen={currentScreen} setCurrentScreen={setCurrentScreen} />
+          )}
+        </div>
+
+        {activeModal && (
+          <Modal activeModal={activeModal} setActiveModal={setActiveModal} />
         )}
+
+        <Toast toast={toast} onClose={() => setToast(null)} />
       </div>
-      
-      {activeModal && (
-        <Modal activeModal={activeModal} setActiveModal={setActiveModal} />
-      )}
-    </div>
+    </ToastContext.Provider>
   );
 }
 
@@ -322,6 +469,15 @@ const globalStyles = `
   @keyframes confetti {
     0% { transform: translateY(0) rotate(0deg); opacity: 1; }
     100% { transform: translateY(-100px) rotate(720deg); opacity: 0; }
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .spin {
+    animation: spin 0.8s linear infinite;
   }
   
   .pulse {
@@ -2264,6 +2420,7 @@ function MealCard({ meal, user, setUser }) {
 
 // Meal Plan Setup Component
 function MealPlanSetup({ user, onComplete, onCancel }) {
+  const toast = useToast();
   const [step, setStep] = useState(1);
   const [preferences, setPreferences] = useState({
     dietType: null,
@@ -2439,6 +2596,7 @@ Make meals delicious, varied, and realistic to prepare. Include a mix of simple 
 
     } catch (error) {
       console.error('Meal plan generation error:', error);
+      toast.error("We couldn't reach the meal planner right now. Showing a starter plan you can use today — try again later for a fully personalized version.");
       onComplete(preferences, getDefaultMealPlan(preferences, calorieTarget, proteinTarget));
     }
   };
@@ -5591,6 +5749,7 @@ function FitnessScreen({ user, setUser }) {
 
 // AI Fitness Assessment Component
 function AIFitnessAssessment({ onComplete, onCancel }) {
+  const toast = useToast();
   const [stage, setStage] = useState('intro'); // intro, camera-setup, exercise, equipment, analyzing, results
   const [currentExercise, setCurrentExercise] = useState(0);
   const [exerciseState, setExerciseState] = useState('ready'); // ready, countdown, performing, captured, analyzing
@@ -5943,6 +6102,7 @@ Be encouraging but honest. Consider that this person is on a GLP-1 medication fo
 
     } catch (error) {
       console.error('Analysis error:', error);
+      toast.error("We couldn't analyze that exercise — likely a connection issue. We'll keep going and you can retake the assessment anytime.");
       // Continue with default results on error
       const defaultAnalysis = {
         exerciseDetected: true,
@@ -5953,7 +6113,7 @@ Be encouraging but honest. Consider that this person is on a GLP-1 medication fo
         mobilityLevel: 'moderate',
         safetyNotes: []
       };
-      
+
       setAnalysisResults(prev => [...prev, { exercise: exercise.id, ...defaultAnalysis }]);
       setIsAnalyzing(false);
 
@@ -6061,6 +6221,7 @@ Only invent a new exercise name if nothing in the list fits. Prefer names from t
 
     } catch (error) {
       console.error('Plan generation error:', error);
+      toast.error("We couldn't generate your custom workout plan. Showing a starter plan based on your equipment — you can regenerate anytime from Fitness.");
       setFinalResults(getDefaultPlan(selectedEquipment));
       setStage('results');
     }
@@ -9764,7 +9925,12 @@ function AddFoodModal({ meal, onClose, onAdd }) {
               onChange={(e) => setQuery(e.target.value)}
               style={styles.foodModalInput}
             />
-            {loading && <p style={styles.foodModalHint}>Searching USDA database…</p>}
+            {loading && (
+              <div style={styles.foodModalLoadingRow}>
+                <span style={styles.foodModalSpinner} aria-hidden="true" />
+                <p style={styles.foodModalHint}>Searching USDA database…</p>
+              </div>
+            )}
             {error && <p style={styles.foodModalError}>{error}</p>}
             <div style={styles.foodResultsList}>
               {results.map((food) => {
@@ -17671,6 +17837,22 @@ const styles = {
     color: '#8A8A8A',
     margin: '12px 0',
     textAlign: 'center',
+  },
+  foodModalLoadingRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '10px',
+    margin: '12px 0',
+  },
+  foodModalSpinner: {
+    width: '16px',
+    height: '16px',
+    borderRadius: '50%',
+    border: '2px solid #E0DDD7',
+    borderTopColor: '#4A6741',
+    animation: 'spin 0.8s linear infinite',
+    display: 'inline-block',
   },
   foodModalError: {
     fontSize: '13px',
