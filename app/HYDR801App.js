@@ -1326,7 +1326,29 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
-  
+
+  // Protein and fiber should only come from the food log — patients shouldn't
+  // be able to tap the goal card to bump them. We read today's log on mount
+  // (and whenever the food log screen closes) and sum logged amounts.
+  const [foodTotals, setFoodTotals] = useState({ protein: 0, fiber: 0 });
+  useEffect(() => {
+    if (showFoodLog) return; // refresh when the log modal/screen closes
+    const entries = loadFoodLog(todayKey());
+    const totals = entries.reduce(
+      (acc, e) => {
+        const servings = e.servings || 1;
+        acc.protein += (e.protein || 0) * servings;
+        acc.fiber += (e.fiber || 0) * servings;
+        return acc;
+      },
+      { protein: 0, fiber: 0 }
+    );
+    setFoodTotals({
+      protein: Math.round(totals.protein),
+      fiber: Math.round(totals.fiber),
+    });
+  }, [showFoodLog]);
+
   const greeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -1432,20 +1454,20 @@ function HomeScreen({ user, setUser, setActiveModal }) {
           <GoalCard
             icon={<ProteinIcon />}
             label="Protein"
-            current={user.proteinCurrent}
+            current={foodTotals.protein}
             goal={user.proteinGoal}
             unit="g"
             color="#4A6741"
-            onIncrement={() => setUser({...user, proteinCurrent: Math.min(user.proteinCurrent + 10, user.proteinGoal)})}
+            hint="Updates from food log"
           />
           <GoalCard
             icon={<FiberIcon />}
             label="Fiber"
-            current={user.fiberCurrent}
+            current={foodTotals.fiber}
             goal={user.fiberGoal}
             unit="g"
             color="#C4956A"
-            onIncrement={() => setUser({...user, fiberCurrent: Math.min(user.fiberCurrent + 5, user.fiberGoal)})}
+            hint="Updates from food log"
           />
           <GoalCard
             icon={<ExerciseIcon />}
@@ -2006,11 +2028,19 @@ function HomeCalendar({ user, setUser }) {
 }
 
 // Goal Card Component
-function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
-  const percentage = Math.round((current / goal) * 100);
-  
+function GoalCard({ icon, label, current, goal, unit, color, onIncrement, hint }) {
+  const safeGoal = goal > 0 ? goal : 1;
+  const percentage = Math.min(100, Math.round((current / safeGoal) * 100));
+  const interactive = typeof onIncrement === 'function';
+
   return (
-    <div style={styles.goalCard} className="card-hover" onClick={onIncrement}>
+    <div
+      style={{ ...styles.goalCard, cursor: interactive ? 'pointer' : 'default' }}
+      className={interactive ? 'card-hover' : undefined}
+      onClick={interactive ? onIncrement : undefined}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+    >
       <div style={styles.goalHeader}>
         <div style={{...styles.goalIcon, backgroundColor: `${color}15`}}>
           {React.cloneElement(icon, { color })}
@@ -2019,7 +2049,7 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <div style={styles.goalProgress}>
         <div style={styles.progressBar}>
-          <div 
+          <div
             className="progress-bar-fill"
             style={{
               ...styles.progressFill,
@@ -2031,6 +2061,7 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <p style={styles.goalLabel}>{label}</p>
       <p style={styles.goalValue}>{current}<span style={styles.goalUnit}>/{goal}{unit}</span></p>
+      {hint && <p style={styles.goalHint}>{hint}</p>}
     </div>
   );
 }
@@ -2040,10 +2071,34 @@ function NutritionScreen({ user, setUser }) {
   const [showMealPlanner, setShowMealPlanner] = useState(false);
   const [selectedDay, setSelectedDay] = useState(0);
 
+  // Read today's food log so protein/fiber/carbs displays match what's
+  // actually been logged. (We re-read on each mount; navigating away to the
+  // Food Log screen and back is what triggers updates.)
+  const loggedToday = useMemo(() => {
+    const entries = loadFoodLog(todayKey());
+    return entries.reduce(
+      (acc, e) => {
+        const s = e.servings || 1;
+        acc.calories += (e.calories || 0) * s;
+        acc.protein += (e.protein || 0) * s;
+        acc.carbs += (e.carbs || 0) * s;
+        acc.fat += (e.fat || 0) * s;
+        acc.fiber += (e.fiber || 0) * s;
+        return acc;
+      },
+      { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
+    );
+  }, []);
+  const loggedProtein = Math.round(loggedToday.protein);
+  const loggedFiber = Math.round(loggedToday.fiber);
+  const loggedCarbs = Math.round(loggedToday.carbs);
+  const loggedFat = Math.round(loggedToday.fat);
+  const loggedCalories = Math.round(loggedToday.calories);
+
   // Calculate calorie goal based on current weight
   // For GLP-1 patients: 10-11 calories per pound of body weight for weight loss
-  const currentWeight = user.weightLog?.length > 0 
-    ? user.weightLog[user.weightLog.length - 1].weight 
+  const currentWeight = user.weightLog?.length > 0
+    ? user.weightLog[user.weightLog.length - 1].weight
     : 180; // default if no weight logged
   const calorieGoal = Math.round(currentWeight * 10.5); // 10.5 cal/lb for moderate deficit
   const carbGoal = Math.round(calorieGoal * 0.35 / 4); // 35% of calories from carbs, 4 cal/g
@@ -2096,8 +2151,8 @@ function NutritionScreen({ user, setUser }) {
         </header>
 
         <div style={styles.macroOverview}>
-          <MacroCircle label="Protein" current={user.proteinCurrent} goal={user.proteinGoal} color="#4A6741" />
-          <MacroCircle label="Fiber" current={user.fiberCurrent} goal={user.fiberGoal} color="#C4956A" />
+          <MacroCircle label="Protein" current={loggedProtein} goal={user.proteinGoal} color="#4A6741" />
+          <MacroCircle label="Fiber" current={loggedFiber} goal={user.fiberGoal} color="#C4956A" />
           <MacroCircle label="Water" current={user.waterCurrent} goal={user.waterGoal} color="#2AABB3" unit="oz" />
         </div>
 
@@ -2165,10 +2220,6 @@ function NutritionScreen({ user, setUser }) {
 
   // Show meal plan
   const todayPlan = user.mealPlan?.weeklyPlan?.[selectedDay] || user.mealPlan?.weeklyPlan?.[0];
-  const totalProtein = todayPlan?.meals?.reduce((sum, m) => sum + (m.protein || 0), 0) || Math.round(user.proteinGoal * 0.9);
-  const totalCarbs = todayPlan?.meals?.reduce((sum, m) => sum + (m.carbs || 0), 0) || Math.round(carbGoal * 0.8);
-  const totalFat = todayPlan?.meals?.reduce((sum, m) => sum + (m.fat || 0), 0) || Math.round(fatGoal * 0.8);
-  const totalCalories = todayPlan?.meals?.reduce((sum, m) => sum + (m.calories || 0), 0) || Math.round(calorieGoal * 0.85);
 
   return (
     <div style={styles.screenContent} className="fade-in">
@@ -2184,16 +2235,16 @@ function NutritionScreen({ user, setUser }) {
           <div style={styles.proteinCircleOuter}>
             <svg width="140" height="140" viewBox="0 0 140 140">
               <circle cx="70" cy="70" r="60" fill="none" stroke="#E8EDE6" strokeWidth="12"/>
-              <circle 
-                cx="70" cy="70" r="60" fill="none" 
+              <circle
+                cx="70" cy="70" r="60" fill="none"
                 stroke="#4A6741" strokeWidth="12" strokeLinecap="round"
-                strokeDasharray={`${(user.proteinCurrent / user.proteinGoal) * 377} 377`}
+                strokeDasharray={`${Math.min(1, loggedProtein / user.proteinGoal) * 377} 377`}
                 transform="rotate(-90 70 70)"
                 className="progress-ring"
               />
             </svg>
             <div style={styles.proteinInner}>
-              <span style={styles.proteinValue}>{user.proteinCurrent}</span>
+              <span style={styles.proteinValue}>{loggedProtein}</span>
               <span style={styles.proteinUnit}>g</span>
             </div>
           </div>
@@ -2207,34 +2258,34 @@ function NutritionScreen({ user, setUser }) {
             <div style={styles.secondaryMacroCircle}>
               <svg width="70" height="70" viewBox="0 0 70 70">
                 <circle cx="35" cy="35" r="28" fill="none" stroke="#F0EBE3" strokeWidth="6"/>
-                <circle 
-                  cx="35" cy="35" r="28" fill="none" 
+                <circle
+                  cx="35" cy="35" r="28" fill="none"
                   stroke="#C4956A" strokeWidth="6" strokeLinecap="round"
-                  strokeDasharray={`${(totalCarbs / carbGoal) * 176} 176`}
+                  strokeDasharray={`${Math.min(1, loggedCarbs / carbGoal) * 176} 176`}
                   transform="rotate(-90 35 35)"
                 />
               </svg>
-              <span style={styles.secondaryMacroValue}>{totalCarbs}</span>
+              <span style={styles.secondaryMacroValue}>{loggedCarbs}</span>
             </div>
             <span style={styles.secondaryMacroLabel}>Carbs</span>
-            <span style={styles.secondaryMacroGoal}>{totalCarbs}g / {carbGoal}g</span>
+            <span style={styles.secondaryMacroGoal}>{loggedCarbs}g / {carbGoal}g</span>
           </div>
-          
+
           <div style={styles.secondaryMacroCard}>
             <div style={styles.secondaryMacroCircle}>
               <svg width="70" height="70" viewBox="0 0 70 70">
                 <circle cx="35" cy="35" r="28" fill="none" stroke="#E8F4F8" strokeWidth="6"/>
-                <circle 
-                  cx="35" cy="35" r="28" fill="none" 
+                <circle
+                  cx="35" cy="35" r="28" fill="none"
                   stroke="#2AABB3" strokeWidth="6" strokeLinecap="round"
-                  strokeDasharray={`${(totalFat / fatGoal) * 176} 176`}
+                  strokeDasharray={`${Math.min(1, loggedFat / fatGoal) * 176} 176`}
                   transform="rotate(-90 35 35)"
                 />
               </svg>
-              <span style={styles.secondaryMacroValue}>{totalFat}</span>
+              <span style={styles.secondaryMacroValue}>{loggedFat}</span>
             </div>
             <span style={styles.secondaryMacroLabel}>Fat</span>
-            <span style={styles.secondaryMacroGoal}>{totalFat}g / {fatGoal}g</span>
+            <span style={styles.secondaryMacroGoal}>{loggedFat}g / {fatGoal}g</span>
           </div>
         </div>
       </div>
@@ -2264,25 +2315,25 @@ function NutritionScreen({ user, setUser }) {
         </div>
       </div>
 
-      {/* Daily summary - Protein first and emphasized */}
+      {/* Daily summary — values come from today's food log */}
       <div style={styles.dailySummaryEnhanced}>
         <div style={styles.summaryItemProtein}>
-          <span style={styles.summaryValueProtein}>{totalProtein}g</span>
+          <span style={styles.summaryValueProtein}>{loggedProtein}g</span>
           <span style={styles.summaryLabelProtein}>PROTEIN</span>
         </div>
         <div style={styles.summaryDivider} />
         <div style={styles.summaryItem}>
-          <span style={styles.summaryValue}>{totalCarbs}g</span>
+          <span style={styles.summaryValue}>{loggedCarbs}g</span>
           <span style={styles.summaryLabel}>CARBS</span>
         </div>
         <div style={styles.summaryDivider} />
         <div style={styles.summaryItem}>
-          <span style={styles.summaryValue}>{totalFat}g</span>
+          <span style={styles.summaryValue}>{loggedFat}g</span>
           <span style={styles.summaryLabel}>FAT</span>
         </div>
         <div style={styles.summaryDivider} />
         <div style={styles.summaryItem}>
-          <span style={styles.summaryValue}>{totalCalories}</span>
+          <span style={styles.summaryValue}>{loggedCalories}</span>
           <span style={styles.summaryLabel}>/ {calorieGoal} CAL</span>
         </div>
       </div>
@@ -2345,13 +2396,32 @@ function MealCard({ meal, user, setUser }) {
   const [expanded, setExpanded] = useState(false);
   const [logged, setLogged] = useState(false);
 
+  // Logging a meal from the plan writes a real entry into today's food log,
+  // which is the single source of truth for protein/fiber/carbs on the home
+  // screen. We don't bump user.proteinCurrent / fiberCurrent anymore — those
+  // were independent counters that drifted from what was actually logged.
   const handleLog = () => {
+    const mealBucketMap = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snacks' };
+    const bucket = mealBucketMap[meal.type] || 'Snacks';
+    const dateKey = todayKey();
+    const entries = loadFoodLog(dateKey);
+    const next = [
+      ...entries,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        meal: bucket,
+        name: meal.name,
+        servingLabel: '1 serving',
+        servings: 1,
+        calories: meal.calories || 0,
+        protein: meal.protein || 0,
+        carbs: meal.carbs || 0,
+        fat: meal.fat || 0,
+        fiber: meal.fiber || 0,
+      },
+    ];
+    saveFoodLog(dateKey, next);
     setLogged(true);
-    setUser({
-      ...user,
-      proteinCurrent: Math.min(user.proteinGoal, user.proteinCurrent + meal.protein),
-      fiberCurrent: Math.min(user.fiberGoal, user.fiberCurrent + meal.fiber)
-    });
   };
 
   return (
@@ -9644,10 +9714,11 @@ const saveFoodLog = (dateKey, entries) => {
   } catch {}
 };
 
-// Pull cal/protein/carbs/fat from USDA foodNutrients (the API uses two slightly
-// different shapes depending on search vs detail endpoints, so check both).
+// Pull cal/protein/carbs/fat/fiber from USDA foodNutrients (the API uses two
+// slightly different shapes depending on search vs detail endpoints, so check
+// both).
 const extractNutrients = (food) => {
-  const out = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const out = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   const nutrients = food?.foodNutrients || [];
   for (const n of nutrients) {
     const id = n.nutrientId ?? n.nutrient?.id;
@@ -9657,6 +9728,7 @@ const extractNutrients = (food) => {
     else if (id === 1003 || name === 'protein') out.protein = Math.round(value * 10) / 10;
     else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
     else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
+    else if (id === 1079 || name.includes('fiber')) out.fiber = Math.round(value * 10) / 10;
   }
   return out;
 };
@@ -9677,13 +9749,14 @@ function FoodLogScreen({ user, onBack }) {
 
   const totals = entries.reduce(
     (acc, e) => {
-      acc.calories += e.calories * e.servings;
-      acc.protein += e.protein * e.servings;
-      acc.carbs += e.carbs * e.servings;
-      acc.fat += e.fat * e.servings;
+      acc.calories += (e.calories || 0) * e.servings;
+      acc.protein += (e.protein || 0) * e.servings;
+      acc.carbs += (e.carbs || 0) * e.servings;
+      acc.fat += (e.fat || 0) * e.servings;
+      acc.fiber += (e.fiber || 0) * e.servings;
       return acc;
     },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
   );
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
@@ -9725,6 +9798,10 @@ function FoodLogScreen({ user, onBack }) {
           <div style={styles.foodLogMacroItem}>
             <span style={{...styles.foodLogMacroValue, color: '#9B7E9B'}}>{Math.round(totals.fat)}g</span>
             <span style={styles.foodLogMacroLabel}>Fat</span>
+          </div>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: '#7A8B5C'}}>{Math.round(totals.fiber)}g</span>
+            <span style={styles.foodLogMacroLabel}>Fiber</span>
           </div>
         </div>
       </div>
@@ -9809,7 +9886,7 @@ function AddFoodModal({ meal, onClose, onAdd }) {
   const [selected, setSelected] = useState(null);
   const [servings, setServings] = useState('1');
   const [showCustom, setShowCustom] = useState(false);
-  const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
+  const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', fiber: '', servingLabel: '1 serving' });
   const searchTimeoutRef = useRef(null);
 
   useEffect(() => {
@@ -9865,6 +9942,7 @@ function AddFoodModal({ meal, onClose, onAdd }) {
         protein: Math.round(macros.protein * factor * 10) / 10,
         carbs: Math.round(macros.carbs * factor * 10) / 10,
         fat: Math.round(macros.fat * factor * 10) / 10,
+        fiber: Math.round(macros.fiber * factor * 10) / 10,
       };
       servingLabel = `${servingSize} ${servingUnit}`;
     }
@@ -9890,6 +9968,7 @@ function AddFoodModal({ meal, onClose, onAdd }) {
       protein: parseFloat(custom.protein) || 0,
       carbs: parseFloat(custom.carbs) || 0,
       fat: parseFloat(custom.fat) || 0,
+      fiber: parseFloat(custom.fiber) || 0,
       servings: 1,
     });
   };
@@ -9946,6 +10025,10 @@ function AddFoodModal({ meal, onClose, onAdd }) {
               <div>
                 <label style={styles.foodModalLabel}>Fat (g)</label>
                 <input style={styles.foodModalInput} type="number" value={custom.fat} onChange={(e) => setCustom({...custom, fat: e.target.value})} />
+              </div>
+              <div>
+                <label style={styles.foodModalLabel}>Fiber (g)</label>
+                <input style={styles.foodModalInput} type="number" value={custom.fiber} onChange={(e) => setCustom({...custom, fiber: e.target.value})} />
               </div>
             </div>
             <button style={styles.primaryButton} onClick={submitCustom} disabled={!custom.name.trim()}>Add to {meal}</button>
@@ -10250,7 +10333,13 @@ const styles = {
     fontWeight: '400',
     color: '#9B9B9B',
   },
-  
+  goalHint: {
+    fontSize: '11px',
+    color: '#9B9B9B',
+    marginTop: '6px',
+    fontStyle: 'italic',
+  },
+
   // Treatment Preview
   treatmentPreview: {
     background: '#FFFFFF',
