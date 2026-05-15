@@ -9769,6 +9769,38 @@ function FoodLogScreen({ user, onBack }) {
   );
 }
 
+// USDA returns results in a relevance-weighted order that often surfaces
+// Branded products above the basic food + cooking variations. For a query
+// like "egg", patients want to see "Egg, whole, scrambled" and
+// "Egg, hard-boiled" before brand-name egg products. We rank by data type
+// (Foundation > SR Legacy > FNDDS > Branded), break ties on USDA's relevance
+// score, and drop near-duplicate descriptions so the list isn't repetitive.
+const DATA_TYPE_RANK = { 'Foundation': 0, 'SR Legacy': 1, 'Survey (FNDDS)': 2, 'Branded': 3 };
+const DATA_TYPE_LABEL = {
+  'Foundation': 'Generic',
+  'SR Legacy': 'Generic',
+  'Survey (FNDDS)': 'Prepared',
+  'Branded': 'Brand',
+};
+
+const rankAndDedupeFoods = (foods) => {
+  const sorted = [...foods].sort((a, b) => {
+    const ra = DATA_TYPE_RANK[a.dataType] ?? 9;
+    const rb = DATA_TYPE_RANK[b.dataType] ?? 9;
+    if (ra !== rb) return ra - rb;
+    return (b.score || 0) - (a.score || 0);
+  });
+  const seen = new Set();
+  const out = [];
+  for (const food of sorted) {
+    const key = `${(food.description || '').toLowerCase().trim()}|${(food.brandName || '').toLowerCase().trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(food);
+  }
+  return out;
+};
+
 function AddFoodModal({ meal, onClose, onAdd }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -9794,7 +9826,11 @@ function AddFoodModal({ meal, onClose, onAdd }) {
         const params = new URLSearchParams();
         params.append('api_key', USDA_API_KEY);
         params.append('query', query);
-        params.append('pageSize', '25');
+        // Larger pageSize gives us more variety to rank/dedupe locally so
+        // basic preparations (hard-boiled, scrambled, etc.) surface above
+        // branded results.
+        params.append('pageSize', '60');
+        params.append('requireAllWords', 'false');
         ['Foundation', 'SR Legacy', 'Survey (FNDDS)', 'Branded'].forEach(t => params.append('dataType', t));
         const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${params.toString()}`);
         if (!res.ok) {
@@ -9802,7 +9838,7 @@ function AddFoodModal({ meal, onClose, onAdd }) {
           throw new Error(`USDA ${res.status}: ${body.slice(0, 120)}`);
         }
         const data = await res.json();
-        setResults(data.foods || []);
+        setResults(rankAndDedupeFoods(data.foods || []));
       } catch (e) {
         console.error('USDA search failed:', e);
         setError('Could not reach the USDA food database. Try again or add a custom food.');
@@ -9935,9 +9971,18 @@ function AddFoodModal({ meal, onClose, onAdd }) {
             <div style={styles.foodResultsList}>
               {results.map((food) => {
                 const macros = extractNutrients(food);
+                const typeLabel = DATA_TYPE_LABEL[food.dataType] || '';
+                const isBrand = food.dataType === 'Branded';
                 return (
                   <button key={food.fdcId} style={styles.foodResultItem} onClick={() => handlePickResult(food)}>
-                    <span style={styles.foodResultName}>{food.description}</span>
+                    <div style={styles.foodResultTopRow}>
+                      <span style={styles.foodResultName}>{food.description}</span>
+                      {typeLabel && (
+                        <span style={{...styles.foodResultBadge, ...(isBrand ? styles.foodResultBadgeBrand : styles.foodResultBadgeGeneric)}}>
+                          {typeLabel}
+                        </span>
+                      )}
+                    </div>
                     {food.brandName && <span style={styles.foodResultBrand}>{food.brandName}</span>}
                     <span style={styles.foodResultMacros}>
                       {macros.calories} cal · P {macros.protein}g · C {macros.carbs}g · F {macros.fat}g <span style={styles.foodResultPer}>per 100g</span>
@@ -9946,7 +9991,7 @@ function AddFoodModal({ meal, onClose, onAdd }) {
                 );
               })}
               {!loading && query.trim() && results.length === 0 && !error && (
-                <p style={styles.foodModalHint}>No matches found.</p>
+                <p style={styles.foodModalHint}>No matches found. Try a simpler word like “egg” or “chicken”, or add a custom food below.</p>
               )}
             </div>
             <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
@@ -17876,10 +17921,35 @@ const styles = {
     flexDirection: 'column',
     gap: '4px',
   },
+  foodResultTopRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: '8px',
+  },
   foodResultName: {
     fontSize: '14px',
     fontWeight: '500',
     color: '#2D2D2D',
+    flex: 1,
+  },
+  foodResultBadge: {
+    fontSize: '10px',
+    fontWeight: '600',
+    padding: '2px 8px',
+    borderRadius: '999px',
+    letterSpacing: '0.4px',
+    textTransform: 'uppercase',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  foodResultBadgeGeneric: {
+    background: '#E8F1E4',
+    color: '#3C5A33',
+  },
+  foodResultBadgeBrand: {
+    background: '#EFEAE2',
+    color: '#7A6448',
   },
   foodResultBrand: {
     fontSize: '12px',
