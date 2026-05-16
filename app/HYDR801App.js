@@ -1,6 +1,63 @@
 'use client';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
+const PROVIDER_API_BASE =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_PROVIDER_API_BASE) ||
+  'https://app.hydr801.com';
+
+// Push the patient's self-reported state up to the provider's EMR so it
+// surfaces in the Patient Tracking dashboard. Debounced (1.5s) so rapid
+// goal increments don't hammer the API. Skips when the user opted out of
+// sharing with their provider.
+function useProviderActivitySync(user) {
+  const lastPayloadRef = useRef('');
+  useEffect(() => {
+    if (!user || !user.id) return;
+    if (user.shareWithProvider === false) return;
+
+    const payload = {
+      externalPatientId: user.id,
+      email: user.email,
+      name: user.name,
+      week: user.week,
+      currentStreak: user.currentStreak,
+      longestStreak: user.longestStreak,
+      waterCurrent: user.waterCurrent,
+      waterGoal: user.waterGoal,
+      proteinCurrent: user.proteinCurrent,
+      proteinGoal: user.proteinGoal,
+      fiberCurrent: user.fiberCurrent,
+      fiberGoal: user.fiberGoal,
+      exerciseCurrent: user.exerciseCurrent,
+      exerciseGoal: user.exerciseGoal,
+      medicationDose: user.medicationDose,
+      injectionDay: user.injectionDay,
+      nextAppointment: user.nextAppointment,
+      weeklyHistory: user.weeklyHistory || [],
+      weightLog: user.weightLog || [],
+      injectionLog: user.injectionLog || [],
+      scheduledInjections: user.scheduledInjections || [],
+      glp1Supply: user.glp1Supply || null,
+      lipocSupply: user.lipocSupply || null,
+    };
+
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastPayloadRef.current) return;
+
+    const handle = setTimeout(() => {
+      lastPayloadRef.current = serialized;
+      fetch(`${PROVIDER_API_BASE}/api/patient-app-activity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: serialized,
+        keepalive: true,
+      }).catch(() => { /* offline / network — best-effort sync */ });
+    }, 1500);
+
+    return () => clearTimeout(handle);
+  }, [user]);
+}
+
 // App Component
 export default function HYDR801App() {
   const [appMode, setAppMode] = useState('patient'); // 'patient' or 'provider'
@@ -184,6 +241,11 @@ export default function HYDR801App() {
       lipocSupply: null,
     },
   ]);
+
+  // Sync the patient's self-reported activity up to the provider's EMR so it
+  // appears in the Patient Tracking section of app.hydr801.com. Debounced so
+  // rapid increments (water, protein) don't spam the API.
+  useProviderActivitySync(user);
 
   // Onboarding flow
   if (showOnboarding && appMode === 'patient') {
