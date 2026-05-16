@@ -130,13 +130,11 @@ export default function HYDR801App() {
     ],
     // Daily goals
     waterGoal: 80,
-    waterCurrent: 48,
+    waterCurrent: 0,
     proteinGoal: 120,
-    proteinCurrent: 65,
     fiberGoal: 25,
-    fiberCurrent: 12,
     exerciseGoal: 30,
-    exerciseCurrent: 20,
+    exerciseCurrent: 0,
     // Weekly history
     weeklyHistory: [
       { week: 1, protein: 85, water: 90, exercise: 70, meals: 95 },

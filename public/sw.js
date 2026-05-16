@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hydr801-v1';
+const CACHE_NAME = 'hydr801-v2';
 const urlsToCache = [
   '/',
   '/manifest.json',
