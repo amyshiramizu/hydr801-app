@@ -4,6 +4,26 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 const PROVIDER_API_BASE =
   (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_PROVIDER_API_BASE) ||
   'https://app.hydr801.com';
+const PROVIDER_HMAC_SECRET =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_PATIENT_APP_HMAC_SECRET) || '';
+const PROVIDER_CLINIC_ID =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_CLINIC_ID) ||
+  '00000000-0000-0000-0000-000000000001';
+
+// Sign `${timestamp}.${clinicId}.${body}` with HMAC-SHA256. Returns hex digest.
+// No-op (empty string) if no secret is configured — the server will then skip
+// verification in dev. Real deploys must set NEXT_PUBLIC_PATIENT_APP_HMAC_SECRET.
+async function signProviderRequest(timestamp, clinicId, body) {
+  if (!PROVIDER_HMAC_SECRET) return '';
+  if (typeof crypto === 'undefined' || !crypto.subtle) return '';
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(PROVIDER_HMAC_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sigBuf = await crypto.subtle.sign('HMAC', key, enc.encode(`${timestamp}.${clinicId}.${body}`));
+  return Array.from(new Uint8Array(sigBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
 // Push the patient's self-reported state up to the provider's EMR so it
 // surfaces in the Patient Tracking dashboard. Debounced (1.5s) so rapid
@@ -44,11 +64,19 @@ function useProviderActivitySync(user) {
     const serialized = JSON.stringify(payload);
     if (serialized === lastPayloadRef.current) return;
 
-    const handle = setTimeout(() => {
+    const handle = setTimeout(async () => {
       lastPayloadRef.current = serialized;
+      const ts = String(Date.now());
+      const signature = await signProviderRequest(ts, PROVIDER_CLINIC_ID, serialized);
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-clinic-id': PROVIDER_CLINIC_ID,
+        'x-timestamp': ts,
+      };
+      if (signature) headers['x-signature'] = signature;
       fetch(`${PROVIDER_API_BASE}/api/patient-app-activity`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: serialized,
         keepalive: true,
       }).catch(() => { /* offline / network — best-effort sync */ });
@@ -145,6 +173,55 @@ function useLocalReminders(user) {
     user.exerciseCurrent,
     user.exerciseGoal,
   ]);
+}
+
+// Streak tracking with a 1-missed-day-per-7 grace window.
+// Each "active" day (any meaningful log: food, water increment, workout) is
+// recorded into a localStorage map. The streak counter walks back from today
+// and tolerates one missing day in any rolling 7-day window before resetting.
+const STREAK_LOG_KEY = 'hydr801_active_days';
+const dateKey = (d) => {
+  const x = d || new Date();
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`;
+};
+const loadActiveDays = () => {
+  if (typeof window === 'undefined') return {};
+  try { return JSON.parse(window.localStorage.getItem(STREAK_LOG_KEY) || '{}'); } catch { return {}; }
+};
+const saveActiveDays = (map) => {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(STREAK_LOG_KEY, JSON.stringify(map)); } catch {}
+};
+function markActiveToday() {
+  const map = loadActiveDays();
+  map[dateKey()] = true;
+  saveActiveDays(map);
+}
+// Compute current streak. Walking back from today, one missed day per 7-day
+// window is forgiven; a second miss breaks the streak. If today itself isn't
+// logged yet, we still credit yesterday-and-back so the count doesn't drop to
+// 0 at midnight before the patient opens the app.
+function computeStreak() {
+  const map = loadActiveDays();
+  let streak = 0;
+  let usedGrace = false;
+  const today = new Date();
+  // If today isn't yet logged, allow the walk to start at yesterday without
+  // consuming the grace day (today is "in progress").
+  let startOffset = map[dateKey(today)] ? 0 : 1;
+  for (let i = startOffset; i < 365; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    if (map[dateKey(d)]) {
+      streak += 1;
+      // Reset grace window every 7 active days.
+      if (streak % 7 === 0) usedGrace = false;
+    } else {
+      if (!usedGrace) { usedGrace = true; continue; }
+      break;
+    }
+  }
+  return streak;
 }
 
 // Recently logged foods — surfaced in the food log + add modal so common
@@ -1353,6 +1430,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
 
   // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
   // was logged in previous sessions today, not the stale starting values.
+  // Also recompute the streak so it accounts for any missed-day grace.
   useEffect(() => {
     const entries = loadFoodLog(todayKey());
     let protein = 0, fiber = 0;
@@ -1363,8 +1441,13 @@ function HomeScreen({ user, setUser, setActiveModal }) {
     });
     const nextProtein = Math.round(protein);
     const nextFiber = Math.round(fiber);
-    if (user.proteinCurrent !== nextProtein || user.fiberCurrent !== nextFiber) {
-      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
+    const nextStreak = computeStreak();
+    if (
+      user.proteinCurrent !== nextProtein ||
+      user.fiberCurrent !== nextFiber ||
+      user.currentStreak !== nextStreak
+    ) {
+      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, currentStreak: nextStreak });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1472,7 +1555,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.waterGoal}
             unit="oz"
             color="#2AABB3"
-            onIncrement={() => setUser({...user, waterCurrent: Math.min(user.waterCurrent + 8, user.waterGoal)})}
+            onIncrement={() => { markActiveToday(); setUser({...user, waterCurrent: Math.min(user.waterCurrent + 8, user.waterGoal), currentStreak: computeStreak()}); }}
           />
           <GoalCard
             icon={<ProteinIcon />}
@@ -2128,6 +2211,23 @@ function ComplianceCard({ user }) {
               {delta > 0 ? '▲' : '▼'} {Math.abs(delta)}% vs last week
             </span>
           )}
+          {(() => {
+            // Grace indicator: show whether the patient still has their
+            // missed-day pass available this 7-day window.
+            const map = loadActiveDays();
+            const today = new Date();
+            let misses = 0;
+            for (let i = 0; i < 7; i++) {
+              const d = new Date(today); d.setDate(d.getDate() - i);
+              if (!map[dateKey(d)]) misses += 1;
+            }
+            // Today not yet logged doesn't count as a miss
+            const todayMissing = !map[dateKey(today)];
+            const effectiveMisses = Math.max(0, misses - (todayMissing ? 1 : 0));
+            return effectiveMisses === 0
+              ? <span style={{fontSize: 11, color: '#888'}} title="One missed day per week is OK">🛟 grace day saved</span>
+              : <span style={{fontSize: 11, color: '#C4956A'}} title="Grace day used — next miss breaks the streak">⚠️ grace day used</span>;
+          })()}
         </div>
       </div>
     </div>
@@ -5793,11 +5893,13 @@ function FitnessScreen({ user, setUser }) {
         user={user}
         onComplete={() => {
           setShowWorkoutPlayer(false);
+          markActiveToday();
           // Award points for completing workout
           setUser({
             ...user,
             totalPoints: (user.totalPoints || 0) + 100,
-            exerciseCurrent: user.exerciseGoal // Mark as completed
+            exerciseCurrent: user.exerciseGoal, // Mark as completed
+            currentStreak: computeStreak(),
           });
         }}
         onExit={() => setShowWorkoutPlayer(false)}
@@ -9865,6 +9967,8 @@ function FoodLogScreen({ user, setUser, onBack }) {
     persist(next);
     pushRecentFood(food);
     setRecents(loadRecentFoods());
+    markActiveToday();
+    if (setUser) setUser({ ...user, currentStreak: computeStreak() });
     setShowAdd(null);
   };
 
