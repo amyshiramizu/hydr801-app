@@ -1232,7 +1232,25 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
-  
+
+  // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
+  // was logged in previous sessions today, not the stale starting values.
+  useEffect(() => {
+    const entries = loadFoodLog(todayKey());
+    let protein = 0, fiber = 0;
+    entries.forEach(e => {
+      const s = e.servings || 1;
+      protein += (e.protein || 0) * s;
+      fiber += (e.fiber || 0) * s;
+    });
+    const nextProtein = Math.round(protein);
+    const nextFiber = Math.round(fiber);
+    if (user.proteinCurrent !== nextProtein || user.fiberCurrent !== nextFiber) {
+      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const greeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -1276,7 +1294,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   }
 
   if (showFoodLog) {
-    return <FoodLogScreen user={user} onBack={() => setShowFoodLog(false)} />;
+    return <FoodLogScreen user={user} setUser={setUser} onBack={() => setShowFoodLog(false)} />;
   }
 
   return (
@@ -1342,7 +1360,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.proteinGoal}
             unit="g"
             color="#4A6741"
-            onIncrement={() => setUser({...user, proteinCurrent: Math.min(user.proteinCurrent + 10, user.proteinGoal)})}
+            lockedHint="Log in Food Log"
           />
           <GoalCard
             icon={<FiberIcon />}
@@ -1351,7 +1369,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.fiberGoal}
             unit="g"
             color="#C4956A"
-            onIncrement={() => setUser({...user, fiberCurrent: Math.min(user.fiberCurrent + 5, user.fiberGoal)})}
+            lockedHint="Log in Food Log"
           />
           <GoalCard
             icon={<ExerciseIcon />}
@@ -1360,7 +1378,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.exerciseGoal}
             unit="min"
             color="#9B7E9B"
-            onIncrement={() => setUser({...user, exerciseCurrent: Math.min(user.exerciseCurrent + 10, user.exerciseGoal)})}
+            lockedHint="Log in Fitness"
           />
         </div>
       </section>
@@ -1912,11 +1930,16 @@ function HomeCalendar({ user, setUser }) {
 }
 
 // Goal Card Component
-function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
+function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint }) {
   const percentage = Math.round((current / goal) * 100);
-  
+  const interactive = typeof onIncrement === 'function';
+
   return (
-    <div style={styles.goalCard} className="card-hover" onClick={onIncrement}>
+    <div
+      style={{...styles.goalCard, cursor: interactive ? 'pointer' : 'default'}}
+      className={interactive ? 'card-hover' : ''}
+      onClick={interactive ? onIncrement : undefined}
+    >
       <div style={styles.goalHeader}>
         <div style={{...styles.goalIcon, backgroundColor: `${color}15`}}>
           {React.cloneElement(icon, { color })}
@@ -1925,7 +1948,7 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <div style={styles.goalProgress}>
         <div style={styles.progressBar}>
-          <div 
+          <div
             className="progress-bar-fill"
             style={{
               ...styles.progressFill,
@@ -1937,6 +1960,9 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <p style={styles.goalLabel}>{label}</p>
       <p style={styles.goalValue}>{current}<span style={styles.goalUnit}>/{goal}{unit}</span></p>
+      {!interactive && lockedHint && (
+        <p style={{fontSize: 10, color: '#9B9B9B', margin: '4px 0 0', fontStyle: 'italic'}}>{lockedHint}</p>
+      )}
     </div>
   );
 }
@@ -9548,7 +9574,7 @@ const saveFoodLog = (dateKey, entries) => {
 // Pull cal/protein/carbs/fat from USDA foodNutrients (the API uses two slightly
 // different shapes depending on search vs detail endpoints, so check both).
 const extractNutrients = (food) => {
-  const out = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const out = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   const nutrients = food?.foodNutrients || [];
   for (const n of nutrients) {
     const id = n.nutrientId ?? n.nutrient?.id;
@@ -9558,11 +9584,12 @@ const extractNutrients = (food) => {
     else if (id === 1003 || name === 'protein') out.protein = Math.round(value * 10) / 10;
     else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
     else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
+    else if (id === 1079 || name.includes('fiber')) out.fiber = Math.round(value * 10) / 10;
   }
   return out;
 };
 
-function FoodLogScreen({ user, onBack }) {
+function FoodLogScreen({ user, setUser, onBack }) {
   const [dateKey] = useState(todayKey());
   const [entries, setEntries] = useState([]);
   const [showAdd, setShowAdd] = useState(null); // meal name to add to, or null
@@ -9582,10 +9609,21 @@ function FoodLogScreen({ user, onBack }) {
       acc.protein += e.protein * e.servings;
       acc.carbs += e.carbs * e.servings;
       acc.fat += e.fat * e.servings;
+      acc.fiber += (e.fiber || 0) * e.servings;
       return acc;
     },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
   );
+
+  // Daily Goals (Protein & Fiber) are derived from the food log — push the
+  // running totals back up so HomeScreen reflects what's been logged.
+  useEffect(() => {
+    if (!setUser) return;
+    const nextProtein = Math.round(totals.protein);
+    const nextFiber = Math.round(totals.fiber);
+    if (user.proteinCurrent === nextProtein && user.fiberCurrent === nextFiber) return;
+    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
+  }, [totals.protein, totals.fiber, setUser]);
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
