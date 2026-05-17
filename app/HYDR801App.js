@@ -58,6 +58,120 @@ function useProviderActivitySync(user) {
   }, [user]);
 }
 
+// Local push reminders. Schedules in-browser notifications for the patient's
+// next injection day, hydration during the day, meals, and movement — based
+// on the toggles on the Notifications subscreen. Uses the Notification API
+// so it works in the installed PWA without a server.
+//
+// Reminders are deduped by `${type}-${YYYY-MM-DD}` in localStorage so we don't
+// fire twice on the same day if the app is re-opened. Scheduling runs once
+// per minute via setInterval, which is precise enough for daily reminders.
+function useLocalReminders(user) {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('Notification' in window)) return;
+    if (user.dailyReminders === false) return;
+
+    const fired = (key) => {
+      try { return localStorage.getItem(`reminder_${key}`) === '1'; } catch { return false; }
+    };
+    const markFired = (key) => {
+      try { localStorage.setItem(`reminder_${key}`, '1'); } catch {}
+    };
+
+    const tryFire = (type, title, body) => {
+      if (Notification.permission !== 'granted') return;
+      const today = new Date().toISOString().slice(0, 10);
+      const key = `${type}-${today}`;
+      if (fired(key)) return;
+      try {
+        new Notification(title, { body, icon: '/icon-192.png', badge: '/icon-192.png', tag: type });
+        markFired(key);
+      } catch {}
+    };
+
+    const tick = () => {
+      const now = new Date();
+      const dow = now.getDay();
+      const hour = now.getHours();
+      const minute = now.getMinutes();
+      const minutesSinceMidnight = hour * 60 + minute;
+
+      // Injection day: 8:00 PM on user.injectionDay
+      if (user.injectionReminder !== false && dow === (user.injectionDay ?? 0) && hour === 20 && minute < 5) {
+        tryFire('injection', '💉 Injection reminder',
+          `Time for your weekly ${user.medicationDose || 'GLP-1'} injection. Take it tonight to sleep through any side effects.`);
+      }
+
+      // Hydration: every 2 hours from 9am-7pm if behind goal
+      if (user.hydrationReminder !== false && hour >= 9 && hour <= 19 && hour % 2 === 1 && minute < 5) {
+        const expected = ((hour - 9) / 10) * (user.waterGoal || 80);
+        if ((user.waterCurrent || 0) < expected - 8) {
+          const key = `hydration-${hour}`;
+          tryFire(key, '💧 Hydration check',
+            `You're at ${user.waterCurrent || 0}/${user.waterGoal || 80} oz. Drink a glass when you can.`);
+        }
+      }
+
+      // Meal logging: 8:30am, 12:30pm, 6:30pm
+      if (user.mealReminder !== false && minute >= 30 && minute < 35) {
+        if (hour === 8) tryFire('meal-breakfast', '🍽️ Breakfast log', "Don't forget to log breakfast in Food Log.");
+        if (hour === 12) tryFire('meal-lunch', '🍽️ Lunch log', "Don't forget to log lunch in Food Log.");
+        if (hour === 18) tryFire('meal-dinner', '🍽️ Dinner log', "Don't forget to log dinner in Food Log.");
+      }
+
+      // Exercise: 4:00 PM if movement < goal
+      if (user.exerciseReminder !== false && hour === 16 && minute < 5) {
+        if ((user.exerciseCurrent || 0) < (user.exerciseGoal || 30)) {
+          tryFire('exercise', '🏃 Movement reminder',
+            `You're at ${user.exerciseCurrent || 0}/${user.exerciseGoal || 30} min today. Try a short walk.`);
+        }
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, [
+    user.dailyReminders,
+    user.injectionReminder,
+    user.hydrationReminder,
+    user.mealReminder,
+    user.exerciseReminder,
+    user.injectionDay,
+    user.medicationDose,
+    user.waterCurrent,
+    user.waterGoal,
+    user.exerciseCurrent,
+    user.exerciseGoal,
+  ]);
+}
+
+// Recently logged foods — surfaced in the food log + add modal so common
+// items can be added in one tap. Newest first, deduped by name, capped at 12.
+const RECENT_FOODS_KEY = 'foodLog_recents';
+const loadRecentFoods = () => {
+  if (typeof window === 'undefined') return [];
+  try { return JSON.parse(window.localStorage.getItem(RECENT_FOODS_KEY) || '[]'); } catch { return []; }
+};
+const saveRecentFoods = (foods) => {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(RECENT_FOODS_KEY, JSON.stringify(foods.slice(0, 12))); } catch {}
+};
+const pushRecentFood = (food) => {
+  const recents = loadRecentFoods();
+  const filtered = recents.filter(r => (r.name || '').toLowerCase() !== (food.name || '').toLowerCase());
+  saveRecentFoods([{
+    name: food.name,
+    servingLabel: food.servingLabel,
+    calories: food.calories,
+    protein: food.protein,
+    carbs: food.carbs,
+    fat: food.fat,
+    fiber: food.fiber || 0,
+  }, ...filtered]);
+};
+
 // App Component
 export default function HYDR801App() {
   const [appMode, setAppMode] = useState('patient'); // 'patient' or 'provider'
@@ -246,6 +360,10 @@ export default function HYDR801App() {
   // appears in the Patient Tracking section of app.hydr801.com. Debounced so
   // rapid increments (water, protein) don't spam the API.
   useProviderActivitySync(user);
+
+  // Local in-browser reminders for injection / hydration / meals / movement.
+  // No-op if the user disabled notifications or hasn't granted permission.
+  useLocalReminders(user);
 
   // Onboarding flow
   if (showOnboarding && appMode === 'patient') {
@@ -1328,6 +1446,9 @@ function HomeScreen({ user, setUser, setActiveModal }) {
       {/* Calendar with Injection Tracking - TOP */}
       <HomeCalendar user={user} setUser={setUser} />
 
+      {/* Your Progress — patient-visible compliance + streak */}
+      <ComplianceCard user={user} />
+
       {/* This Week's Guidance */}
       <div style={styles.weekGuidanceCard}>
         <div style={styles.weekGuidanceHeader}>
@@ -1930,6 +2051,89 @@ function HomeCalendar({ user, setUser }) {
 }
 
 // Goal Card Component
+// Patient-facing compliance + streak card. Compliance is the same number the
+// provider sees: average of protein/water/exercise/meals across the latest
+// week in weeklyHistory. If history is empty, derive from today's progress
+// so brand-new patients see something useful.
+function ComplianceCard({ user }) {
+  const wh = Array.isArray(user.weeklyHistory) ? user.weeklyHistory : [];
+  const last = wh.length ? wh[wh.length - 1] : null;
+  const prev = wh.length > 1 ? wh[wh.length - 2] : null;
+
+  let compliance;
+  if (last) {
+    const parts = ['protein','water','exercise','meals']
+      .map(k => Number(last[k]))
+      .filter(n => Number.isFinite(n));
+    compliance = parts.length ? Math.round(parts.reduce((s,n) => s+n, 0) / parts.length) : 0;
+  } else {
+    const protein = user.proteinGoal ? (user.proteinCurrent / user.proteinGoal) * 100 : 0;
+    const water = user.waterGoal ? (user.waterCurrent / user.waterGoal) * 100 : 0;
+    const exercise = user.exerciseGoal ? (user.exerciseCurrent / user.exerciseGoal) * 100 : 0;
+    compliance = Math.round((protein + water + exercise) / 3);
+  }
+  compliance = Math.max(0, Math.min(100, compliance));
+
+  let prevCompliance = null;
+  if (prev) {
+    const parts = ['protein','water','exercise','meals']
+      .map(k => Number(prev[k]))
+      .filter(n => Number.isFinite(n));
+    prevCompliance = parts.length ? Math.round(parts.reduce((s,n) => s+n, 0) / parts.length) : null;
+  }
+  const delta = prevCompliance != null ? compliance - prevCompliance : null;
+
+  const ringColor = compliance >= 80 ? '#4A6741' : compliance >= 60 ? '#C4956A' : '#9B7E60';
+  const ringSize = 72;
+  const ringStroke = 8;
+  const ringRadius = (ringSize - ringStroke) / 2;
+  const ringCirc = 2 * Math.PI * ringRadius;
+  const ringOffset = ringCirc - (compliance / 100) * ringCirc;
+
+  return (
+    <div style={{
+      background: '#fff',
+      borderRadius: 16,
+      padding: 16,
+      margin: '0 0 16px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16,
+      boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+    }}>
+      <div style={{position: 'relative', width: ringSize, height: ringSize, flexShrink: 0}}>
+        <svg width={ringSize} height={ringSize}>
+          <circle cx={ringSize/2} cy={ringSize/2} r={ringRadius} fill="none" stroke="#EAE8E4" strokeWidth={ringStroke} />
+          <circle
+            cx={ringSize/2} cy={ringSize/2} r={ringRadius}
+            fill="none" stroke={ringColor} strokeWidth={ringStroke} strokeLinecap="round"
+            strokeDasharray={ringCirc} strokeDashoffset={ringOffset}
+            transform={`rotate(-90 ${ringSize/2} ${ringSize/2})`}
+            style={{transition: 'stroke-dashoffset 0.6s ease'}}
+          />
+        </svg>
+        <div style={{position: 'absolute', top: 0, left: 0, width: ringSize, height: ringSize, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column'}}>
+          <span style={{fontSize: 18, fontWeight: 700, color: ringColor, lineHeight: 1}}>{compliance}%</span>
+        </div>
+      </div>
+      <div style={{flex: 1, minWidth: 0}}>
+        <p style={{fontSize: 12, color: '#9B9B9B', margin: 0, textTransform: 'uppercase', letterSpacing: 0.4}}>Your Progress</p>
+        <p style={{fontSize: 15, fontWeight: 600, color: '#2B2B2B', margin: '2px 0 0'}}>
+          {compliance >= 85 ? "You're crushing it" : compliance >= 70 ? 'On track' : compliance >= 50 ? 'Keep going' : "Let's get you back on track"}
+        </p>
+        <div style={{display: 'flex', alignItems: 'center', gap: 10, marginTop: 6, flexWrap: 'wrap'}}>
+          <span style={{fontSize: 12, color: '#666'}}>🔥 {user.currentStreak || 0}-day streak</span>
+          {delta != null && delta !== 0 && (
+            <span style={{fontSize: 11, color: delta > 0 ? '#4A6741' : '#C4956A', fontWeight: 600}}>
+              {delta > 0 ? '▲' : '▼'} {Math.abs(delta)}% vs last week
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint }) {
   const percentage = Math.round((current / goal) * 100);
   const interactive = typeof onIncrement === 'function';
@@ -8639,16 +8843,42 @@ function ProfileScreen({ user, setUser }) {
 
   // Notifications Subscreen
   if (activeSubscreen === 'notifications') {
+    const notifSupported = typeof window !== 'undefined' && 'Notification' in window;
+    const notifPermission = notifSupported ? Notification.permission : 'unsupported';
     return (
       <div style={styles.screenContent} className="fade-in">
         <div style={styles.subscreenHeader}>
           <button style={styles.backButton} onClick={() => setActiveSubscreen(null)}>← Back</button>
           <h2 style={styles.subscreenTitle}>Notifications</h2>
         </div>
-        
+
         <div style={styles.notificationsSection}>
+          {/* Permission banner */}
+          {notifPermission === 'default' && (
+            <div style={{padding: 14, background: '#F0F4EE', borderRadius: 12, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12}}>
+              <div style={{flex: 1}}>
+                <p style={{fontWeight: 600, fontSize: 13, margin: 0, color: '#4A6741'}}>Enable push reminders</p>
+                <p style={{fontSize: 12, color: '#666', margin: '2px 0 0'}}>Allow notifications so HYDR801 can remind you on injection day, hydration, and meals.</p>
+              </div>
+              <button
+                style={{padding: '8px 14px', background: '#4A6741', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer'}}
+                onClick={() => { try { Notification.requestPermission(); } catch {} }}
+              >Enable</button>
+            </div>
+          )}
+          {notifPermission === 'denied' && (
+            <div style={{padding: 12, background: '#FFF5F0', borderRadius: 12, marginBottom: 16}}>
+              <p style={{fontSize: 12, color: '#9B7E60', margin: 0}}>Notifications are blocked in your browser settings. Enable them there to receive reminders.</p>
+            </div>
+          )}
+          {notifPermission === 'unsupported' && (
+            <div style={{padding: 12, background: '#F5F5F5', borderRadius: 12, marginBottom: 16}}>
+              <p style={{fontSize: 12, color: '#888', margin: 0}}>This browser doesn't support notifications.</p>
+            </div>
+          )}
+
           <h4 style={styles.notificationsSectionTitle}>Reminders</h4>
-          
+
           <div style={styles.notificationRow}>
             <div style={styles.notificationInfo}>
               <span style={styles.notificationIcon}>💉</span>
@@ -9626,11 +9856,22 @@ function FoodLogScreen({ user, setUser, onBack }) {
   }, [totals.protein, totals.fiber, setUser]);
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
+  const [recents, setRecents] = useState([]);
+  useEffect(() => { setRecents(loadRecentFoods()); }, []);
 
   const addEntry = (mealName, food) => {
-    const next = [...entries, { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` }];
+    const entry = { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` };
+    const next = [...entries, entry];
     persist(next);
+    pushRecentFood(food);
+    setRecents(loadRecentFoods());
     setShowAdd(null);
+  };
+
+  // Quick-add a recent food directly to a meal (default to Snacks when the
+  // patient is on the main food log view).
+  const quickAddRecent = (food) => {
+    addEntry('Snacks', { ...food, servings: 1 });
   };
 
   const removeEntry = (id) => {
@@ -9667,6 +9908,37 @@ function FoodLogScreen({ user, setUser, onBack }) {
           </div>
         </div>
       </div>
+
+      {/* Recently logged — one-tap add to Snacks */}
+      {recents.length > 0 && (
+        <section style={styles.section}>
+          <h3 style={styles.sectionTitle}>Quick add</h3>
+          <div style={{display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginLeft: -4, paddingLeft: 4}}>
+            {recents.map((r, idx) => (
+              <button
+                key={idx}
+                onClick={() => quickAddRecent(r)}
+                style={{
+                  flex: '0 0 auto',
+                  background: '#fff',
+                  border: '1px solid #EAE8E4',
+                  borderRadius: 12,
+                  padding: '10px 12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  minWidth: 140,
+                  maxWidth: 200,
+                }}
+                title={`Add to Snacks: ${r.name}`}
+              >
+                <p style={{fontSize: 12, fontWeight: 600, margin: 0, color: '#2B2B2B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{r.name}</p>
+                <p style={{fontSize: 11, color: '#888', margin: '2px 0 0'}}>{Math.round(r.calories)} cal · P {Math.round(r.protein)}g</p>
+                <p style={{fontSize: 10, color: '#4A6741', margin: '4px 0 0', fontWeight: 600}}>＋ Tap to add</p>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {meals.map(meal => {
         const mealEntries = entries.filter(e => e.meal === meal);
@@ -9717,6 +9989,8 @@ function AddFoodModal({ meal, onClose, onAdd }) {
   const [servings, setServings] = useState('1');
   const [showCustom, setShowCustom] = useState(false);
   const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
+  const [recents, setRecents] = useState([]);
+  useEffect(() => { setRecents(loadRecentFoods()); }, []);
   const searchTimeoutRef = useRef(null);
 
   useEffect(() => {
@@ -9866,6 +10140,26 @@ function AddFoodModal({ meal, onClose, onAdd }) {
             />
             {loading && <p style={styles.foodModalHint}>Searching USDA database…</p>}
             {error && <p style={styles.foodModalError}>{error}</p>}
+            {!query.trim() && recents.length > 0 && (
+              <div style={{marginTop: 8}}>
+                <p style={{fontSize: 11, fontWeight: 600, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.5, margin: '4px 0 8px'}}>Recently added</p>
+                <div style={styles.foodResultsList}>
+                  {recents.map((r, idx) => (
+                    <button
+                      key={idx}
+                      style={styles.foodResultItem}
+                      onClick={() => onAdd({ ...r, servings: 1 })}
+                    >
+                      <span style={styles.foodResultName}>{r.name}</span>
+                      <span style={styles.foodResultMacros}>
+                        {Math.round(r.calories)} cal · P {Math.round(r.protein)}g · C {Math.round(r.carbs)}g · F {Math.round(r.fat)}g
+                        <span style={styles.foodResultPer}> per {r.servingLabel || '1 serving'}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={styles.foodResultsList}>
               {results.map((food) => {
                 const macros = extractNutrients(food);
