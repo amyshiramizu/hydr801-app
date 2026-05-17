@@ -10284,6 +10284,7 @@ function FoodLogScreen({ user, setUser, onBack }) {
   const [dateKey] = useState(todayKey());
   const [entries, setEntries] = useState([]);
   const [showAdd, setShowAdd] = useState(null); // meal name to add to, or null
+  const [showPhoto, setShowPhoto] = useState(false); // camera/AI flow
 
   useEffect(() => {
     setEntries(loadFoodLog(dateKey));
@@ -10372,6 +10373,30 @@ function FoodLogScreen({ user, setUser, onBack }) {
         </div>
       </div>
 
+      {/* Snap a meal — AI-assisted photo logging */}
+      <button
+        onClick={() => setShowPhoto(true)}
+        style={{
+          width: '100%',
+          marginTop: 12,
+          padding: '14px 16px',
+          background: 'linear-gradient(135deg, #4A6741 0%, #5B7B50 100%)',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 12,
+          fontSize: 14,
+          fontWeight: 600,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+          boxShadow: '0 2px 8px rgba(74,103,65,0.25)',
+        }}
+      >
+        <span style={{fontSize: 18}}>📷</span> Snap a meal — auto-log nutrition
+      </button>
+
       {/* Recently logged — one-tap add to Snacks */}
       {recents.length > 0 && (
         <section style={styles.section}>
@@ -10437,6 +10462,16 @@ function FoodLogScreen({ user, setUser, onBack }) {
           meal={showAdd}
           onClose={() => setShowAdd(null)}
           onAdd={(food) => addEntry(showAdd, food)}
+        />
+      )}
+
+      {showPhoto && (
+        <PhotoFoodModal
+          onClose={() => setShowPhoto(false)}
+          onConfirm={(mealName, foods) => {
+            foods.forEach(f => addEntry(mealName, f));
+            setShowPhoto(false);
+          }}
         />
       )}
     </div>
@@ -10643,6 +10678,284 @@ function AddFoodModal({ meal, onClose, onAdd }) {
             <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Resize + compress a chosen image to keep the vision API upload small.
+// Returns { dataUrl, base64, mimeType } at JPEG quality 0.85, max edge 1280px.
+async function compressImageForVision(file, maxEdge = 1280, quality = 0.85) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+  const outDataUrl = canvas.toDataURL('image/jpeg', quality);
+  return {
+    dataUrl: outDataUrl,
+    base64: outDataUrl.replace(/^data:image\/\w+;base64,/, ''),
+    mimeType: 'image/jpeg',
+  };
+}
+
+// Snap-a-meal flow: capture a photo, send to Claude vision, let the patient
+// confirm/edit the parsed items, then write them to the food log.
+function PhotoFoodModal({ onClose, onConfirm }) {
+  const [stage, setStage] = useState('capture'); // capture | analyzing | review | error
+  const [preview, setPreview] = useState(null);
+  const [base64, setBase64] = useState(null);
+  const [mimeType, setMimeType] = useState('image/jpeg');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState(null);
+  const [items, setItems] = useState([]);
+  const [mealGuess, setMealGuess] = useState('Snacks');
+  const [summary, setSummary] = useState('');
+  const [warnings, setWarnings] = useState([]);
+  const fileInputRef = useRef(null);
+
+  const pickFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setError('Please choose an image file.');
+      return;
+    }
+    setError(null);
+    compressImageForVision(file).then(({ dataUrl, base64: b64, mimeType: mt }) => {
+      setPreview(dataUrl);
+      setBase64(b64);
+      setMimeType(mt);
+    }).catch(() => setError('Could not read that image.'));
+  };
+
+  const analyze = async () => {
+    if (!base64) return;
+    setStage('analyzing');
+    setError(null);
+    try {
+      const token = authApi.loadToken();
+      if (!token) {
+        setStage('error');
+        setError('Please sign in before using photo logging.');
+        return;
+      }
+      const r = await fetch(`${PROVIDER_API_BASE}/api/food-vision`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ image: base64, mimeType, note }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setStage('error');
+        setError(data.error || `Could not analyze photo (${r.status})`);
+        return;
+      }
+      if (!data.items?.length) {
+        setStage('error');
+        setError(data.summary || 'No food detected in the photo. Try again with better lighting.');
+        return;
+      }
+      // Default servings = 1 for everything; patient can adjust before saving.
+      setItems(data.items.map(it => ({ ...it, _include: true, _servings: 1 })));
+      setMealGuess(data.mealGuess || 'Snacks');
+      setSummary(data.summary || '');
+      setWarnings(data.warnings || []);
+      setStage('review');
+    } catch (err) {
+      setStage('error');
+      setError(err.message || 'Photo analysis failed.');
+    }
+  };
+
+  const confirm = () => {
+    const chosen = items
+      .filter(it => it._include)
+      .map(it => ({
+        name: it.name,
+        servingLabel: it.servingLabel,
+        calories: it.calories,
+        protein: it.protein,
+        carbs: it.carbs,
+        fat: it.fat,
+        fiber: it.fiber,
+        servings: Number(it._servings) || 1,
+      }));
+    if (chosen.length === 0) {
+      setError('Select at least one item to log.');
+      return;
+    }
+    onConfirm(mealGuess, chosen);
+  };
+
+  const totals = items
+    .filter(i => i._include)
+    .reduce((acc, i) => {
+      const s = Number(i._servings) || 1;
+      acc.calories += i.calories * s;
+      acc.protein += i.protein * s;
+      return acc;
+    }, { calories: 0, protein: 0 });
+
+  return (
+    <div style={styles.foodModalBackdrop} onClick={onClose}>
+      <div style={styles.foodModal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.foodModalHeader}>
+          <h2 style={styles.foodModalTitle}>📷 Snap a Meal</h2>
+          <button style={styles.foodModalClose} onClick={onClose}>×</button>
+        </div>
+
+        <div style={styles.foodModalBody}>
+          {stage === 'capture' && (
+            <>
+              {!preview ? (
+                <div style={{textAlign:'center',padding:'24px 0'}}>
+                  <div style={{fontSize:48,marginBottom:12}}>🍽️</div>
+                  <p style={{fontSize:13,color:'#666',marginBottom:18}}>
+                    Take a clear photo of your plate. We'll identify each item and estimate the nutrition for you.
+                  </p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={pickFile}
+                    style={{display:'none'}}
+                  />
+                  <button
+                    style={{...styles.primaryButton, marginBottom: 10}}
+                    onClick={() => fileInputRef.current?.click()}
+                  >📷 Take photo</button>
+                  <p style={{fontSize:11,color:'#9B9B9B'}}>You can also choose an existing photo.</p>
+                </div>
+              ) : (
+                <>
+                  <div style={{position:'relative',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                    <img src={preview} alt="Meal" style={{width:'100%',display:'block',maxHeight:280,objectFit:'cover'}} />
+                  </div>
+                  <label style={styles.foodModalLabel}>Add a note (optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. half a portion, no dressing"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    style={styles.foodModalInput}
+                    maxLength={200}
+                  />
+                  {error && <p style={styles.foodModalError}>{error}</p>}
+                  <button style={styles.primaryButton} onClick={analyze}>Analyze nutrition →</button>
+                  <button
+                    style={styles.secondaryButton}
+                    onClick={() => { setPreview(null); setBase64(null); setNote(''); }}
+                  >Retake photo</button>
+                </>
+              )}
+              {error && !preview && <p style={styles.foodModalError}>{error}</p>}
+            </>
+          )}
+
+          {stage === 'analyzing' && (
+            <div style={{textAlign:'center',padding:'40px 0'}}>
+              <div style={{fontSize:40,marginBottom:12}}>🔍</div>
+              <p style={{fontSize:14,color:'#4A6741',fontWeight:600,marginBottom:6}}>Analyzing your meal…</p>
+              <p style={{fontSize:12,color:'#888'}}>Identifying foods and estimating nutrition.</p>
+            </div>
+          )}
+
+          {stage === 'error' && (
+            <div style={{padding:'12px 0'}}>
+              <p style={styles.foodModalError}>{error}</p>
+              <button style={styles.primaryButton} onClick={() => { setStage('capture'); setError(null); }}>Try again</button>
+            </div>
+          )}
+
+          {stage === 'review' && (
+            <>
+              {preview && (
+                <img src={preview} alt="Meal" style={{width:'100%',display:'block',maxHeight:140,objectFit:'cover',borderRadius:10,marginBottom:12}} />
+              )}
+              {summary && <p style={{fontSize:12,color:'#666',marginBottom:8,fontStyle:'italic'}}>"{summary}"</p>}
+
+              <label style={styles.foodModalLabel}>Meal</label>
+              <select
+                value={mealGuess}
+                onChange={(e) => setMealGuess(e.target.value)}
+                style={{...styles.foodModalInput, appearance:'auto'}}
+              >
+                {['Breakfast','Lunch','Dinner','Snacks'].map(m => <option key={m}>{m}</option>)}
+              </select>
+
+              <div style={{margin:'12px 0 6px'}}>
+                <span style={styles.foodModalLabel}>Detected items — uncheck or adjust servings</span>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:280,overflow:'auto',marginBottom:12}}>
+                {items.map((it, idx) => (
+                  <div key={idx} style={{display:'flex',alignItems:'center',gap:10,padding:10,background:it._include ? '#F0F4EE' : '#F7F6F4',borderRadius:10,opacity:it._include ? 1 : 0.55}}>
+                    <input
+                      type="checkbox"
+                      checked={it._include}
+                      onChange={(e) => setItems(items.map((x,i) => i === idx ? {...x, _include: e.target.checked} : x))}
+                      style={{flexShrink:0}}
+                    />
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{fontSize:13,fontWeight:600,margin:0,color:'#2B2B2B'}}>{it.name}</p>
+                      <p style={{fontSize:11,color:'#666',margin:'2px 0 0'}}>
+                        {it.calories} cal · P {it.protein}g · C {it.carbs}g · F {it.fat}g
+                        <span style={{marginLeft:6,color:'#888'}}>per {it.servingLabel}</span>
+                      </p>
+                      <p style={{fontSize:10,color:it.confidence === 'high' ? '#16a34a' : it.confidence === 'medium' ? '#C4956A' : '#9B7E60',margin:'2px 0 0',fontWeight:600,textTransform:'uppercase',letterSpacing:0.4}}>
+                        {it.confidence} confidence
+                      </p>
+                    </div>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0.25"
+                      value={it._servings}
+                      onChange={(e) => setItems(items.map((x,i) => i === idx ? {...x, _servings: e.target.value} : x))}
+                      style={{width:54,padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                      title="Servings"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {warnings.length > 0 && (
+                <div style={{padding:'8px 10px',background:'#FFF8E6',borderRadius:8,marginBottom:10,fontSize:11,color:'#9B7E60'}}>
+                  {warnings.map((w,i) => <div key={i}>⚠️ {w}</div>)}
+                </div>
+              )}
+
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'#F0F4EE',borderRadius:10,marginBottom:12}}>
+                <span style={{fontSize:12,color:'#666'}}>Total to log</span>
+                <span style={{fontSize:14,fontWeight:700,color:'#4A6741'}}>{Math.round(totals.calories)} cal · {Math.round(totals.protein)}g protein</span>
+              </div>
+
+              {error && <p style={styles.foodModalError}>{error}</p>}
+              <button style={styles.primaryButton} onClick={confirm}>Add to {mealGuess}</button>
+              <button
+                style={styles.secondaryButton}
+                onClick={() => { setStage('capture'); setError(null); }}
+              >← Retake or pick a different photo</button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
