@@ -10786,19 +10786,19 @@ function PhotoFoodModal({ onClose, onConfirm }) {
 
   const confirm = () => {
     const chosen = items
-      .filter(it => it._include)
+      .filter(it => it._include && (it.name || '').trim())
       .map(it => ({
-        name: it.name,
-        servingLabel: it.servingLabel,
-        calories: it.calories,
-        protein: it.protein,
-        carbs: it.carbs,
-        fat: it.fat,
-        fiber: it.fiber,
+        name: it.name.trim(),
+        servingLabel: (it.servingLabel || '1 serving').trim(),
+        calories: Number(it.calories) || 0,
+        protein: Number(it.protein) || 0,
+        carbs: Number(it.carbs) || 0,
+        fat: Number(it.fat) || 0,
+        fiber: Number(it.fiber) || 0,
         servings: Number(it._servings) || 1,
       }));
     if (chosen.length === 0) {
-      setError('Select at least one item to log.');
+      setError('Select at least one item to log (and give every item a name).');
       return;
     }
     onConfirm(mealGuess, chosen);
@@ -10901,39 +10901,114 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                 {['Breakfast','Lunch','Dinner','Snacks'].map(m => <option key={m}>{m}</option>)}
               </select>
 
-              <div style={{margin:'12px 0 6px'}}>
-                <span style={styles.foodModalLabel}>Detected items — uncheck or adjust servings</span>
+              <div style={{margin:'12px 0 6px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={styles.foodModalLabel}>Detected items — edit anything wrong</span>
+                <button
+                  type="button"
+                  onClick={() => setItems([...items, {
+                    name: '', servingLabel: '1 serving',
+                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0,
+                    confidence: 'low',
+                    _include: true, _servings: 1, _editing: true, _manual: true,
+                  }])}
+                  style={{fontSize:11,color:'#4A6741',background:'none',border:'1px dashed #4A6741',borderRadius:6,padding:'3px 8px',cursor:'pointer'}}
+                >+ Add missing item</button>
               </div>
-              <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:280,overflow:'auto',marginBottom:12}}>
-                {items.map((it, idx) => (
-                  <div key={idx} style={{display:'flex',alignItems:'center',gap:10,padding:10,background:it._include ? '#F0F4EE' : '#F7F6F4',borderRadius:10,opacity:it._include ? 1 : 0.55}}>
-                    <input
-                      type="checkbox"
-                      checked={it._include}
-                      onChange={(e) => setItems(items.map((x,i) => i === idx ? {...x, _include: e.target.checked} : x))}
-                      style={{flexShrink:0}}
-                    />
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{fontSize:13,fontWeight:600,margin:0,color:'#2B2B2B'}}>{it.name}</p>
-                      <p style={{fontSize:11,color:'#666',margin:'2px 0 0'}}>
-                        {it.calories} cal · P {it.protein}g · C {it.carbs}g · F {it.fat}g
-                        <span style={{marginLeft:6,color:'#888'}}>per {it.servingLabel}</span>
-                      </p>
-                      <p style={{fontSize:10,color:it.confidence === 'high' ? '#16a34a' : it.confidence === 'medium' ? '#C4956A' : '#9B7E60',margin:'2px 0 0',fontWeight:600,textTransform:'uppercase',letterSpacing:0.4}}>
-                        {it.confidence} confidence
-                      </p>
+              <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:340,overflow:'auto',marginBottom:12}}>
+                {items.map((it, idx) => {
+                  const updateItem = (patch) => setItems(items.map((x,i) => i === idx ? { ...x, ...patch } : x));
+                  const removeItem = () => setItems(items.filter((_, i) => i !== idx));
+                  const numInput = (key, label, width = 56) => (
+                    <label style={{display:'flex',flexDirection:'column',gap:2,minWidth:0}}>
+                      <span style={{fontSize:9,color:'#888',textTransform:'uppercase',letterSpacing:0.4}}>{label}</span>
+                      <input
+                        type="number" min="0" step="0.1"
+                        value={it[key] ?? 0}
+                        onChange={(e) => updateItem({ [key]: Math.max(0, Number(e.target.value) || 0) })}
+                        style={{width,padding:'5px 6px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                      />
+                    </label>
+                  );
+                  return (
+                    <div key={idx} style={{padding:10,background:it._include ? '#F0F4EE' : '#F7F6F4',borderRadius:10,opacity:it._include ? 1 : 0.55}}>
+                      <div style={{display:'flex',alignItems:'flex-start',gap:10}}>
+                        <input
+                          type="checkbox"
+                          checked={it._include}
+                          onChange={(e) => updateItem({ _include: e.target.checked })}
+                          style={{flexShrink:0,marginTop:3}}
+                        />
+                        <div style={{flex:1,minWidth:0}}>
+                          {it._editing ? (
+                            <input
+                              type="text"
+                              value={it.name}
+                              autoFocus={it._manual}
+                              onChange={(e) => updateItem({ name: e.target.value })}
+                              placeholder="Food name (e.g. Grilled chicken)"
+                              style={{width:'100%',padding:'6px 8px',border:'1px solid #c5d6be',borderRadius:6,fontSize:13,fontWeight:600,background:'#fff',color:'#2B2B2B'}}
+                            />
+                          ) : (
+                            <p style={{fontSize:13,fontWeight:600,margin:0,color:'#2B2B2B',wordBreak:'break-word'}}>{it.name || '(no name)'}</p>
+                          )}
+                          {!it._editing && (
+                            <p style={{fontSize:11,color:'#666',margin:'2px 0 0'}}>
+                              {it.calories} cal · P {it.protein}g · C {it.carbs}g · F {it.fat}g
+                              <span style={{marginLeft:6,color:'#888'}}>per {it.servingLabel}</span>
+                            </p>
+                          )}
+                          {!it._editing && !it._manual && (
+                            <p style={{fontSize:10,color:it.confidence === 'high' ? '#16a34a' : it.confidence === 'medium' ? '#C4956A' : '#9B7E60',margin:'2px 0 0',fontWeight:600,textTransform:'uppercase',letterSpacing:0.4}}>
+                              {it.confidence} confidence
+                            </p>
+                          )}
+                        </div>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.25"
+                          value={it._servings}
+                          onChange={(e) => updateItem({ _servings: e.target.value })}
+                          style={{width:54,padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                          title="Servings"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateItem({ _editing: !it._editing })}
+                          title={it._editing ? 'Done editing' : 'Edit nutrition'}
+                          style={{background:'none',border:'none',cursor:'pointer',padding:4,fontSize:14,color:it._editing ? '#4A6741' : '#888'}}
+                        >{it._editing ? '✓' : '✏️'}</button>
+                      </div>
+
+                      {it._editing && (
+                        <div style={{marginTop:10,paddingTop:10,borderTop:'1px solid #d8e3d3'}}>
+                          <label style={{display:'block',marginBottom:8}}>
+                            <span style={{fontSize:9,color:'#888',textTransform:'uppercase',letterSpacing:0.4,display:'block',marginBottom:2}}>Serving size label</span>
+                            <input
+                              type="text"
+                              value={it.servingLabel}
+                              onChange={(e) => updateItem({ servingLabel: e.target.value })}
+                              placeholder="e.g. 6 oz, 1 cup, 1 piece"
+                              style={{width:'100%',padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                            />
+                          </label>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(5, 1fr)',gap:6}}>
+                            {numInput('calories', 'Cal')}
+                            {numInput('protein', 'Protein g')}
+                            {numInput('carbs', 'Carbs g')}
+                            {numInput('fat', 'Fat g')}
+                            {numInput('fiber', 'Fiber g')}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={removeItem}
+                            style={{marginTop:10,background:'none',border:'none',color:'#b91c1c',fontSize:11,cursor:'pointer',padding:0}}
+                          >🗑️ Remove this item</button>
+                        </div>
+                      )}
                     </div>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.25"
-                      value={it._servings}
-                      onChange={(e) => setItems(items.map((x,i) => i === idx ? {...x, _servings: e.target.value} : x))}
-                      style={{width:54,padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
-                      title="Servings"
-                    />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {warnings.length > 0 && (
