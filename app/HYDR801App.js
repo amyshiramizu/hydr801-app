@@ -249,10 +249,143 @@ const pushRecentFood = (food) => {
   }, ...filtered]);
 };
 
+// ─── Auth + persistent state ────────────────────────────────────────────────
+// Patient login lives on the same EMR API as the provider sync. Tokens are
+// stored in localStorage. State is saved to the backend (debounced) so the
+// patient picks up where they left off on any device.
+const AUTH_TOKEN_KEY = 'hydr801_auth_token';
+
+const authApi = {
+  loadToken: () => {
+    if (typeof window === 'undefined') return null;
+    try { return window.localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; }
+  },
+  saveToken: (t) => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(AUTH_TOKEN_KEY, t); } catch {}
+  },
+  clearToken: () => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.removeItem(AUTH_TOKEN_KEY); } catch {}
+  },
+  signup: async (email, password, name) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=signup`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, name }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Sign up failed');
+    return data;
+  },
+  login: async (email, password) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Login failed');
+    return data;
+  },
+  me: async (token) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=me`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (r.status === 401) return null;
+    if (!r.ok) throw new Error('Failed to load profile');
+    return r.json();
+  },
+  saveState: async (token, state) => {
+    return fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(state),
+      keepalive: true,
+    });
+  },
+  logout: async (token) => {
+    if (!token) return;
+    fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=logout`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${token}` },
+    }).catch(() => {});
+  },
+};
+
+// Default state for a brand-new patient (used when their saved state is empty).
+// Mirrors the mock state HYDR801App used to start with.
+function defaultPatientState(profile) {
+  return {
+    id: profile?.id || 'me',
+    name: profile?.name || 'Friend',
+    email: profile?.email || '',
+    fitnessAssessmentComplete: false,
+    fitnessLevel: null,
+    workoutPlan: null,
+    equipment: [],
+    mealPlanComplete: false,
+    mealPlan: null,
+    dietaryPreferences: null,
+    week: 1,
+    startDate: new Date().toISOString().slice(0, 10),
+    currentStreak: 0,
+    longestStreak: 0,
+    totalPoints: 0,
+    level: 'Bronze',
+    badges: [],
+    weightLog: [],
+    waterGoal: 80, waterCurrent: 0,
+    proteinGoal: 120, proteinCurrent: 0,
+    fiberGoal: 25, fiberCurrent: 0,
+    exerciseGoal: 30, exerciseCurrent: 0,
+    weeklyHistory: [],
+    providerNotes: [],
+    nextAppointment: null,
+    medicationDose: null,
+    medicationSchedule: null,
+    injectionDay: 0,
+    injectionLog: [],
+    scheduledInjections: [],
+    glp1Supply: null,
+    lipocSupply: null,
+    achievements: {},
+    earnedBadges: [],
+    referralCode: '',
+    loyaltyTier: 'Bronze',
+    totalSpent: 0,
+    lifetimeSpent: 0,
+    referralCount: 0,
+    referralCredits: 0,
+    loyaltyPoints: 0,
+    referralHistory: [],
+    spendingHistory: [],
+    onboardingComplete: false,
+  };
+}
+
+// Persist the patient's full state to the backend whenever it changes, with a
+// 1.5s debounce. No-op if not authenticated.
+function usePatientStatePersistence(token, user) {
+  const lastSerializedRef = useRef('');
+  useEffect(() => {
+    if (!token || !user) return;
+    const serialized = JSON.stringify(user);
+    if (serialized === lastSerializedRef.current) return;
+    const handle = setTimeout(() => {
+      lastSerializedRef.current = serialized;
+      authApi.saveState(token, user).catch(() => { /* best-effort */ });
+    }, 1500);
+    return () => clearTimeout(handle);
+  }, [token, user]);
+}
+
 // App Component
 export default function HYDR801App() {
   const [appMode, setAppMode] = useState('patient'); // 'patient' or 'provider'
   const [currentScreen, setCurrentScreen] = useState('home');
+  // Auth: undefined = checking, null = not authed, object = authed user
+  const [authToken, setAuthToken] = useState(undefined);
+  const [authProfile, setAuthProfile] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authError, setAuthError] = useState(null);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [user, setUser] = useState({
     id: 'patient_001',
@@ -442,13 +575,123 @@ export default function HYDR801App() {
   // No-op if the user disabled notifications or hasn't granted permission.
   useLocalReminders(user);
 
-  // Onboarding flow
+  // Persist state to the backend so the patient picks up where they left off.
+  usePatientStatePersistence(authToken, authProfile ? user : null);
+
+  // On boot, look for an existing session token and rehydrate user state.
+  useEffect(() => {
+    let cancelled = false;
+    const boot = async () => {
+      const token = authApi.loadToken();
+      if (!token) {
+        if (!cancelled) { setAuthToken(null); setAuthChecked(true); }
+        return;
+      }
+      try {
+        const me = await authApi.me(token);
+        if (cancelled) return;
+        if (!me) {
+          authApi.clearToken();
+          setAuthToken(null);
+          setAuthChecked(true);
+          return;
+        }
+        setAuthToken(token);
+        setAuthProfile(me.user);
+        // Merge saved state over defaults so newer fields appear.
+        const seed = { ...defaultPatientState(me.user), ...(me.state || {}), id: me.user.id, email: me.user.email, name: me.user.name };
+        setUser(seed);
+        setShowOnboarding(!seed.onboardingComplete);
+        setAuthChecked(true);
+      } catch (err) {
+        if (!cancelled) {
+          setAuthError(err.message || 'Could not load profile');
+          setAuthChecked(true);
+          setAuthToken(null);
+        }
+      }
+    };
+    boot();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleAuthSuccess = async ({ token, user: profile }) => {
+    authApi.saveToken(token);
+    setAuthToken(token);
+    setAuthProfile(profile);
+    // Pull persisted state (signup returns empty, login may have prior state).
+    try {
+      const me = await authApi.me(token);
+      const seed = { ...defaultPatientState(profile), ...(me?.state || {}), id: profile.id, email: profile.email, name: profile.name };
+      setUser(seed);
+      setShowOnboarding(!seed.onboardingComplete);
+    } catch {
+      const seed = defaultPatientState(profile);
+      setUser(seed);
+      setShowOnboarding(true);
+    }
+  };
+
+  const handleLogout = () => {
+    authApi.logout(authToken);
+    authApi.clearToken();
+    setAuthToken(null);
+    setAuthProfile(null);
+    setUser(defaultPatientState(null));
+    setShowOnboarding(true);
+    setCurrentScreen('home');
+    setAppMode('patient');
+  };
+
+  // Still checking session / loading saved state — render a quick splash so
+  // the welcome onboarding doesn't flash before we know who the user is.
+  if (!authChecked) {
+    return (
+      <div style={styles.appContainer}>
+        <style>{globalStyles}</style>
+        <div style={styles.phoneFrame}>
+          <div style={{...styles.screen, display:'flex', alignItems:'center', justifyContent:'center'}}>
+            <div style={{textAlign:'center'}}>
+              <div style={{fontSize:48,marginBottom:12}}>🌿</div>
+              <p style={{color:'#888',fontSize:14}}>Loading your wellness journey…</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Not signed in — block the rest of the app with a login/signup screen.
+  if (!authToken && appMode === 'patient') {
+    return (
+      <div style={styles.appContainer}>
+        <style>{globalStyles}</style>
+        <div style={styles.phoneFrame}>
+          <AuthScreen
+            initialError={authError}
+            onSuccess={handleAuthSuccess}
+            onSkipAsDemo={() => { /* keep mock data, no token */
+              setAuthToken('demo');
+              setAuthProfile({ id: 'demo', email: 'demo@example.com', name: 'Demo Patient' });
+              setShowOnboarding(true);
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Onboarding flow (first-time after signup, or skipped patients)
   if (showOnboarding && appMode === 'patient') {
     return (
       <div style={styles.appContainer}>
         <style>{globalStyles}</style>
         <div style={styles.phoneFrame}>
-          <OnboardingFlow onComplete={() => setShowOnboarding(false)} />
+          <OnboardingFlow onComplete={() => {
+            setShowOnboarding(false);
+            // Persist completion immediately so we don't re-show next session.
+            setUser(prev => ({ ...prev, onboardingComplete: true }));
+          }} />
         </div>
       </div>
     );
@@ -459,7 +702,7 @@ export default function HYDR801App() {
     nutrition: <NutritionScreen user={user} setUser={setUser} />,
     fitness: <FitnessScreen user={user} setUser={setUser} />,
     education: <EducationScreen user={user} />,
-    profile: <ProfileScreen user={user} setUser={setUser} />,
+    profile: <ProfileScreen user={user} setUser={setUser} onLogout={handleLogout} authProfile={authProfile} />,
   };
 
   const providerScreens = {
@@ -626,6 +869,111 @@ const globalStyles = `
 `;
 
 // ==================== ONBOARDING FLOW ====================
+// Sign-in / sign-up gate. Renders before onboarding so the patient is bound
+// to a real account before they start logging anything.
+function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
+  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(initialError || null);
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    setError(null);
+    setBusy(true);
+    try {
+      const data = mode === 'signup'
+        ? await authApi.signup(email.trim(), password, name.trim())
+        : await authApi.login(email.trim(), password);
+      await onSuccess(data);
+    } catch (err) {
+      setError(err.message || 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{minHeight:'100%',background:'#F5F4F2',display:'flex',flexDirection:'column',padding:'48px 24px 24px'}}>
+      <div style={{textAlign:'center',marginBottom:28}}>
+        <div style={{fontSize:48,marginBottom:8}}>🌿</div>
+        <h1 style={{fontFamily:'Fraunces, serif',fontSize:24,margin:0,color:'#2B2B2B'}}>HYDR801</h1>
+        <p style={{fontSize:13,color:'#4A6741',margin:'4px 0 0'}}>Your personalized GLP-1 wellness companion</p>
+      </div>
+
+      <div style={{background:'#fff',borderRadius:16,padding:20,boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+        <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
+          <button
+            onClick={() => { setMode('login'); setError(null); }}
+            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
+          >Sign in</button>
+          <button
+            onClick={() => { setMode('signup'); setError(null); }}
+            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
+          >Create account</button>
+        </div>
+
+        <form onSubmit={submit}>
+          {mode === 'signup' && (
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
+              <input
+                type="text" value={name} onChange={(e) => setName(e.target.value)}
+                placeholder="Your name" autoComplete="name"
+                style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+              />
+            </div>
+          )}
+          <div style={{marginBottom:12}}>
+            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
+            <input
+              type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com" autoComplete="email" required
+              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+            />
+          </div>
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
+            <input
+              type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
+              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+              minLength={mode === 'signup' ? 8 : undefined} required
+              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+            />
+          </div>
+
+          {error && (
+            <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
+            style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
+          >
+            {busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}
+          </button>
+        </form>
+
+        {onSkipAsDemo && (
+          <button
+            onClick={onSkipAsDemo}
+            style={{marginTop:12,width:'100%',padding:'10px',background:'none',color:'#888',border:'1px dashed #EAE8E4',borderRadius:10,fontSize:12,cursor:'pointer'}}
+          >Continue without an account (demo mode)</button>
+        )}
+      </div>
+
+      <p style={{marginTop:20,textAlign:'center',fontSize:11,color:'#9B9B9B'}}>
+        By creating an account you consent to sharing your wellness logs with your HYDR801 provider.
+      </p>
+    </div>
+  );
+}
+
 function OnboardingFlow({ onComplete }) {
   const [step, setStep] = useState(0);
 
@@ -8503,7 +8851,7 @@ function LoyaltyProgramScreen({ user, setUser, onBack }) {
 }
 
 // Profile Screen
-function ProfileScreen({ user, setUser }) {
+function ProfileScreen({ user, setUser, onLogout, authProfile }) {
   const [showWeightLog, setShowWeightLog] = useState(false);
   const [showLoyalty, setShowLoyalty] = useState(false);
   const [activeSubscreen, setActiveSubscreen] = useState(null);
@@ -9367,7 +9715,18 @@ function ProfileScreen({ user, setUser }) {
         ))}
       </div>
 
-      <button style={styles.signOutButton}>Sign Out</button>
+      {authProfile && (
+        <p style={{textAlign:'center',fontSize:11,color:'#9B9B9B',margin:'8px 0'}}>
+          Signed in as <strong style={{color:'#666'}}>{authProfile.email}</strong>
+        </p>
+      )}
+      <button
+        style={styles.signOutButton}
+        onClick={() => {
+          if (typeof window !== 'undefined' && !window.confirm('Sign out of HYDR801?')) return;
+          onLogout && onLogout();
+        }}
+      >Sign Out</button>
     </div>
   );
 }
