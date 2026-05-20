@@ -1,10 +1,391 @@
 'use client';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
+const PROVIDER_API_BASE =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_PROVIDER_API_BASE) ||
+  'https://app.hydr801.com';
+const PROVIDER_HMAC_SECRET =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_PATIENT_APP_HMAC_SECRET) || '';
+const PROVIDER_CLINIC_ID =
+  (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_CLINIC_ID) ||
+  '00000000-0000-0000-0000-000000000001';
+
+// Sign `${timestamp}.${clinicId}.${body}` with HMAC-SHA256. Returns hex digest.
+// No-op (empty string) if no secret is configured — the server will then skip
+// verification in dev. Real deploys must set NEXT_PUBLIC_PATIENT_APP_HMAC_SECRET.
+async function signProviderRequest(timestamp, clinicId, body) {
+  if (!PROVIDER_HMAC_SECRET) return '';
+  if (typeof crypto === 'undefined' || !crypto.subtle) return '';
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(PROVIDER_HMAC_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sigBuf = await crypto.subtle.sign('HMAC', key, enc.encode(`${timestamp}.${clinicId}.${body}`));
+  return Array.from(new Uint8Array(sigBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Push the patient's self-reported state up to the provider's EMR so it
+// surfaces in the Patient Tracking dashboard. Debounced (1.5s) so rapid
+// goal increments don't hammer the API. Skips when the user opted out of
+// sharing with their provider.
+function useProviderActivitySync(user) {
+  const lastPayloadRef = useRef('');
+  useEffect(() => {
+    if (!user || !user.id) return;
+    if (user.shareWithProvider === false) return;
+
+    const payload = {
+      externalPatientId: user.id,
+      email: user.email,
+      name: user.name,
+      week: user.week,
+      currentStreak: user.currentStreak,
+      longestStreak: user.longestStreak,
+      waterCurrent: user.waterCurrent,
+      waterGoal: user.waterGoal,
+      proteinCurrent: user.proteinCurrent,
+      proteinGoal: user.proteinGoal,
+      fiberCurrent: user.fiberCurrent,
+      fiberGoal: user.fiberGoal,
+      exerciseCurrent: user.exerciseCurrent,
+      exerciseGoal: user.exerciseGoal,
+      medicationDose: user.medicationDose,
+      injectionDay: user.injectionDay,
+      nextAppointment: user.nextAppointment,
+      weeklyHistory: user.weeklyHistory || [],
+      weightLog: user.weightLog || [],
+      injectionLog: user.injectionLog || [],
+      scheduledInjections: user.scheduledInjections || [],
+      glp1Supply: user.glp1Supply || null,
+      lipocSupply: user.lipocSupply || null,
+    };
+
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastPayloadRef.current) return;
+
+    const handle = setTimeout(async () => {
+      lastPayloadRef.current = serialized;
+      const ts = String(Date.now());
+      const signature = await signProviderRequest(ts, PROVIDER_CLINIC_ID, serialized);
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-clinic-id': PROVIDER_CLINIC_ID,
+        'x-timestamp': ts,
+      };
+      if (signature) headers['x-signature'] = signature;
+      fetch(`${PROVIDER_API_BASE}/api/patient-app-activity`, {
+        method: 'POST',
+        headers,
+        body: serialized,
+        keepalive: true,
+      }).catch(() => { /* offline / network — best-effort sync */ });
+    }, 1500);
+
+    return () => clearTimeout(handle);
+  }, [user]);
+}
+
+// Local push reminders. Schedules in-browser notifications for the patient's
+// next injection day, hydration during the day, meals, and movement — based
+// on the toggles on the Notifications subscreen. Uses the Notification API
+// so it works in the installed PWA without a server.
+//
+// Reminders are deduped by `${type}-${YYYY-MM-DD}` in localStorage so we don't
+// fire twice on the same day if the app is re-opened. Scheduling runs once
+// per minute via setInterval, which is precise enough for daily reminders.
+function useLocalReminders(user) {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('Notification' in window)) return;
+    if (user.dailyReminders === false) return;
+
+    const fired = (key) => {
+      try { return localStorage.getItem(`reminder_${key}`) === '1'; } catch { return false; }
+    };
+    const markFired = (key) => {
+      try { localStorage.setItem(`reminder_${key}`, '1'); } catch {}
+    };
+
+    const tryFire = (type, title, body) => {
+      if (Notification.permission !== 'granted') return;
+      const today = new Date().toISOString().slice(0, 10);
+      const key = `${type}-${today}`;
+      if (fired(key)) return;
+      try {
+        new Notification(title, { body, icon: '/icon-192.png', badge: '/icon-192.png', tag: type });
+        markFired(key);
+      } catch {}
+    };
+
+    const tick = () => {
+      const now = new Date();
+      const dow = now.getDay();
+      const hour = now.getHours();
+      const minute = now.getMinutes();
+      const minutesSinceMidnight = hour * 60 + minute;
+
+      // Injection day: 8:00 PM on user.injectionDay
+      if (user.injectionReminder !== false && dow === (user.injectionDay ?? 0) && hour === 20 && minute < 5) {
+        tryFire('injection', '💉 Injection reminder',
+          `Time for your weekly ${user.medicationDose || 'GLP-1'} injection. Take it tonight to sleep through any side effects.`);
+      }
+
+      // Hydration: every 2 hours from 9am-7pm if behind goal
+      if (user.hydrationReminder !== false && hour >= 9 && hour <= 19 && hour % 2 === 1 && minute < 5) {
+        const expected = ((hour - 9) / 10) * (user.waterGoal || 80);
+        if ((user.waterCurrent || 0) < expected - 8) {
+          const key = `hydration-${hour}`;
+          tryFire(key, '💧 Hydration check',
+            `You're at ${user.waterCurrent || 0}/${user.waterGoal || 80} oz. Drink a glass when you can.`);
+        }
+      }
+
+      // Meal logging: 8:30am, 12:30pm, 6:30pm
+      if (user.mealReminder !== false && minute >= 30 && minute < 35) {
+        if (hour === 8) tryFire('meal-breakfast', '🍽️ Breakfast log', "Don't forget to log breakfast in Food Log.");
+        if (hour === 12) tryFire('meal-lunch', '🍽️ Lunch log', "Don't forget to log lunch in Food Log.");
+        if (hour === 18) tryFire('meal-dinner', '🍽️ Dinner log', "Don't forget to log dinner in Food Log.");
+      }
+
+      // Exercise: 4:00 PM if movement < goal
+      if (user.exerciseReminder !== false && hour === 16 && minute < 5) {
+        if ((user.exerciseCurrent || 0) < (user.exerciseGoal || 30)) {
+          tryFire('exercise', '🏃 Movement reminder',
+            `You're at ${user.exerciseCurrent || 0}/${user.exerciseGoal || 30} min today. Try a short walk.`);
+        }
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, [
+    user.dailyReminders,
+    user.injectionReminder,
+    user.hydrationReminder,
+    user.mealReminder,
+    user.exerciseReminder,
+    user.injectionDay,
+    user.medicationDose,
+    user.waterCurrent,
+    user.waterGoal,
+    user.exerciseCurrent,
+    user.exerciseGoal,
+  ]);
+}
+
+// Streak tracking with a 1-missed-day-per-7 grace window.
+// Each "active" day (any meaningful log: food, water increment, workout) is
+// recorded into a localStorage map. The streak counter walks back from today
+// and tolerates one missing day in any rolling 7-day window before resetting.
+const STREAK_LOG_KEY = 'hydr801_active_days';
+const dateKey = (d) => {
+  const x = d || new Date();
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`;
+};
+const loadActiveDays = () => {
+  if (typeof window === 'undefined') return {};
+  try { return JSON.parse(window.localStorage.getItem(STREAK_LOG_KEY) || '{}'); } catch { return {}; }
+};
+const saveActiveDays = (map) => {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(STREAK_LOG_KEY, JSON.stringify(map)); } catch {}
+};
+function markActiveToday() {
+  const map = loadActiveDays();
+  map[dateKey()] = true;
+  saveActiveDays(map);
+}
+// Compute current streak. Walking back from today, one missed day per 7-day
+// window is forgiven; a second miss breaks the streak. If today itself isn't
+// logged yet, we still credit yesterday-and-back so the count doesn't drop to
+// 0 at midnight before the patient opens the app.
+function computeStreak() {
+  const map = loadActiveDays();
+  let streak = 0;
+  let usedGrace = false;
+  const today = new Date();
+  // If today isn't yet logged, allow the walk to start at yesterday without
+  // consuming the grace day (today is "in progress").
+  let startOffset = map[dateKey(today)] ? 0 : 1;
+  for (let i = startOffset; i < 365; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    if (map[dateKey(d)]) {
+      streak += 1;
+      // Reset grace window every 7 active days.
+      if (streak % 7 === 0) usedGrace = false;
+    } else {
+      if (!usedGrace) { usedGrace = true; continue; }
+      break;
+    }
+  }
+  return streak;
+}
+
+// Recently logged foods — surfaced in the food log + add modal so common
+// items can be added in one tap. Newest first, deduped by name, capped at 12.
+const RECENT_FOODS_KEY = 'foodLog_recents';
+const loadRecentFoods = () => {
+  if (typeof window === 'undefined') return [];
+  try { return JSON.parse(window.localStorage.getItem(RECENT_FOODS_KEY) || '[]'); } catch { return []; }
+};
+const saveRecentFoods = (foods) => {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(RECENT_FOODS_KEY, JSON.stringify(foods.slice(0, 12))); } catch {}
+};
+const pushRecentFood = (food) => {
+  const recents = loadRecentFoods();
+  const filtered = recents.filter(r => (r.name || '').toLowerCase() !== (food.name || '').toLowerCase());
+  saveRecentFoods([{
+    name: food.name,
+    servingLabel: food.servingLabel,
+    calories: food.calories,
+    protein: food.protein,
+    carbs: food.carbs,
+    fat: food.fat,
+    fiber: food.fiber || 0,
+  }, ...filtered]);
+};
+
+// ─── Auth + persistent state ────────────────────────────────────────────────
+// Patient login lives on the same EMR API as the provider sync. Tokens are
+// stored in localStorage. State is saved to the backend (debounced) so the
+// patient picks up where they left off on any device.
+const AUTH_TOKEN_KEY = 'hydr801_auth_token';
+
+const authApi = {
+  loadToken: () => {
+    if (typeof window === 'undefined') return null;
+    try { return window.localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; }
+  },
+  saveToken: (t) => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(AUTH_TOKEN_KEY, t); } catch {}
+  },
+  clearToken: () => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.removeItem(AUTH_TOKEN_KEY); } catch {}
+  },
+  signup: async (email, password, name) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=signup`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, name }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Sign up failed');
+    return data;
+  },
+  login: async (email, password) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Login failed');
+    return data;
+  },
+  me: async (token) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=me`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (r.status === 401) return null;
+    if (!r.ok) throw new Error('Failed to load profile');
+    return r.json();
+  },
+  saveState: async (token, state) => {
+    return fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(state),
+      keepalive: true,
+    });
+  },
+  logout: async (token) => {
+    if (!token) return;
+    fetch(`${PROVIDER_API_BASE}/api/patient-app-auth?action=logout`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${token}` },
+    }).catch(() => {});
+  },
+};
+
+// Default state for a brand-new patient (used when their saved state is empty).
+// Mirrors the mock state HYDR801App used to start with.
+function defaultPatientState(profile) {
+  return {
+    id: profile?.id || 'me',
+    name: profile?.name || 'Friend',
+    email: profile?.email || '',
+    fitnessAssessmentComplete: false,
+    fitnessLevel: null,
+    workoutPlan: null,
+    equipment: [],
+    mealPlanComplete: false,
+    mealPlan: null,
+    dietaryPreferences: null,
+    week: 1,
+    startDate: new Date().toISOString().slice(0, 10),
+    currentStreak: 0,
+    longestStreak: 0,
+    totalPoints: 0,
+    level: 'Bronze',
+    badges: [],
+    weightLog: [],
+    waterGoal: 80, waterCurrent: 0,
+    proteinGoal: 120, proteinCurrent: 0,
+    fiberGoal: 25, fiberCurrent: 0,
+    exerciseGoal: 30, exerciseCurrent: 0,
+    weeklyHistory: [],
+    providerNotes: [],
+    nextAppointment: null,
+    medicationDose: null,
+    medicationSchedule: null,
+    injectionDay: 0,
+    injectionLog: [],
+    scheduledInjections: [],
+    glp1Supply: null,
+    lipocSupply: null,
+    achievements: {},
+    earnedBadges: [],
+    referralCode: '',
+    loyaltyTier: 'Bronze',
+    totalSpent: 0,
+    lifetimeSpent: 0,
+    referralCount: 0,
+    referralCredits: 0,
+    loyaltyPoints: 0,
+    referralHistory: [],
+    spendingHistory: [],
+    onboardingComplete: false,
+  };
+}
+
+// Persist the patient's full state to the backend whenever it changes, with a
+// 1.5s debounce. No-op if not authenticated.
+function usePatientStatePersistence(token, user) {
+  const lastSerializedRef = useRef('');
+  useEffect(() => {
+    if (!token || !user) return;
+    const serialized = JSON.stringify(user);
+    if (serialized === lastSerializedRef.current) return;
+    const handle = setTimeout(() => {
+      lastSerializedRef.current = serialized;
+      authApi.saveState(token, user).catch(() => { /* best-effort */ });
+    }, 1500);
+    return () => clearTimeout(handle);
+  }, [token, user]);
+}
+
 // App Component
 export default function HYDR801App() {
   const [appMode, setAppMode] = useState('patient'); // 'patient' or 'provider'
   const [currentScreen, setCurrentScreen] = useState('home');
+  // Auth: undefined = checking, null = not authed, object = authed user
+  const [authToken, setAuthToken] = useState(undefined);
+  const [authProfile, setAuthProfile] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authError, setAuthError] = useState(null);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [user, setUser] = useState({
     id: 'patient_001',
@@ -185,13 +566,132 @@ export default function HYDR801App() {
     },
   ]);
 
-  // Onboarding flow
+  // Sync the patient's self-reported activity up to the provider's EMR so it
+  // appears in the Patient Tracking section of app.hydr801.com. Debounced so
+  // rapid increments (water, protein) don't spam the API.
+  useProviderActivitySync(user);
+
+  // Local in-browser reminders for injection / hydration / meals / movement.
+  // No-op if the user disabled notifications or hasn't granted permission.
+  useLocalReminders(user);
+
+  // Persist state to the backend so the patient picks up where they left off.
+  usePatientStatePersistence(authToken, authProfile ? user : null);
+
+  // On boot, look for an existing session token and rehydrate user state.
+  useEffect(() => {
+    let cancelled = false;
+    const boot = async () => {
+      const token = authApi.loadToken();
+      if (!token) {
+        if (!cancelled) { setAuthToken(null); setAuthChecked(true); }
+        return;
+      }
+      try {
+        const me = await authApi.me(token);
+        if (cancelled) return;
+        if (!me) {
+          authApi.clearToken();
+          setAuthToken(null);
+          setAuthChecked(true);
+          return;
+        }
+        setAuthToken(token);
+        setAuthProfile(me.user);
+        // Merge saved state over defaults so newer fields appear.
+        const seed = { ...defaultPatientState(me.user), ...(me.state || {}), id: me.user.id, email: me.user.email, name: me.user.name };
+        setUser(seed);
+        setShowOnboarding(!seed.onboardingComplete);
+        setAuthChecked(true);
+      } catch (err) {
+        if (!cancelled) {
+          setAuthError(err.message || 'Could not load profile');
+          setAuthChecked(true);
+          setAuthToken(null);
+        }
+      }
+    };
+    boot();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleAuthSuccess = async ({ token, user: profile }) => {
+    authApi.saveToken(token);
+    setAuthToken(token);
+    setAuthProfile(profile);
+    // Pull persisted state (signup returns empty, login may have prior state).
+    try {
+      const me = await authApi.me(token);
+      const seed = { ...defaultPatientState(profile), ...(me?.state || {}), id: profile.id, email: profile.email, name: profile.name };
+      setUser(seed);
+      setShowOnboarding(!seed.onboardingComplete);
+    } catch {
+      const seed = defaultPatientState(profile);
+      setUser(seed);
+      setShowOnboarding(true);
+    }
+  };
+
+  const handleLogout = () => {
+    authApi.logout(authToken);
+    authApi.clearToken();
+    setAuthToken(null);
+    setAuthProfile(null);
+    setUser(defaultPatientState(null));
+    setShowOnboarding(true);
+    setCurrentScreen('home');
+    setAppMode('patient');
+  };
+
+  // Still checking session / loading saved state — render a quick splash so
+  // the welcome onboarding doesn't flash before we know who the user is.
+  if (!authChecked) {
+    return (
+      <div style={styles.appContainer}>
+        <style>{globalStyles}</style>
+        <div style={styles.phoneFrame}>
+          <div style={{...styles.screen, display:'flex', alignItems:'center', justifyContent:'center'}}>
+            <div style={{textAlign:'center'}}>
+              <div style={{fontSize:48,marginBottom:12}}>🌿</div>
+              <p style={{color:'#888',fontSize:14}}>Loading your wellness journey…</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Not signed in — block the rest of the app with a login/signup screen.
+  if (!authToken && appMode === 'patient') {
+    return (
+      <div style={styles.appContainer}>
+        <style>{globalStyles}</style>
+        <div style={styles.phoneFrame}>
+          <AuthScreen
+            initialError={authError}
+            onSuccess={handleAuthSuccess}
+            onSkipAsDemo={() => { /* keep mock data, no token */
+              setAuthToken('demo');
+              setAuthProfile({ id: 'demo', email: 'demo@example.com', name: 'Demo Patient' });
+              setShowOnboarding(true);
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Onboarding flow (first-time after signup, or skipped patients)
   if (showOnboarding && appMode === 'patient') {
     return (
       <div style={styles.appContainer}>
         <style>{globalStyles}</style>
         <div style={styles.phoneFrame}>
-          <OnboardingFlow onComplete={() => setShowOnboarding(false)} />
+          <OnboardingFlow onComplete={() => {
+            setShowOnboarding(false);
+            // Persist completion immediately so we don't re-show next session.
+            setUser(prev => ({ ...prev, onboardingComplete: true }));
+          }} />
         </div>
       </div>
     );
@@ -202,7 +702,7 @@ export default function HYDR801App() {
     nutrition: <NutritionScreen user={user} setUser={setUser} />,
     fitness: <FitnessScreen user={user} setUser={setUser} />,
     education: <EducationScreen user={user} />,
-    profile: <ProfileScreen user={user} setUser={setUser} />,
+    profile: <ProfileScreen user={user} setUser={setUser} onLogout={handleLogout} authProfile={authProfile} />,
   };
 
   const providerScreens = {
@@ -369,6 +869,111 @@ const globalStyles = `
 `;
 
 // ==================== ONBOARDING FLOW ====================
+// Sign-in / sign-up gate. Renders before onboarding so the patient is bound
+// to a real account before they start logging anything.
+function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
+  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(initialError || null);
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    setError(null);
+    setBusy(true);
+    try {
+      const data = mode === 'signup'
+        ? await authApi.signup(email.trim(), password, name.trim())
+        : await authApi.login(email.trim(), password);
+      await onSuccess(data);
+    } catch (err) {
+      setError(err.message || 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{minHeight:'100%',background:'#F5F4F2',display:'flex',flexDirection:'column',padding:'48px 24px 24px'}}>
+      <div style={{textAlign:'center',marginBottom:28}}>
+        <div style={{fontSize:48,marginBottom:8}}>🌿</div>
+        <h1 style={{fontFamily:'Fraunces, serif',fontSize:24,margin:0,color:'#2B2B2B'}}>HYDR801</h1>
+        <p style={{fontSize:13,color:'#4A6741',margin:'4px 0 0'}}>Your personalized GLP-1 wellness companion</p>
+      </div>
+
+      <div style={{background:'#fff',borderRadius:16,padding:20,boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+        <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
+          <button
+            onClick={() => { setMode('login'); setError(null); }}
+            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
+          >Sign in</button>
+          <button
+            onClick={() => { setMode('signup'); setError(null); }}
+            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
+          >Create account</button>
+        </div>
+
+        <form onSubmit={submit}>
+          {mode === 'signup' && (
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
+              <input
+                type="text" value={name} onChange={(e) => setName(e.target.value)}
+                placeholder="Your name" autoComplete="name"
+                style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+              />
+            </div>
+          )}
+          <div style={{marginBottom:12}}>
+            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
+            <input
+              type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com" autoComplete="email" required
+              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+            />
+          </div>
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
+            <input
+              type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
+              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+              minLength={mode === 'signup' ? 8 : undefined} required
+              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+            />
+          </div>
+
+          {error && (
+            <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
+            style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
+          >
+            {busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}
+          </button>
+        </form>
+
+        {onSkipAsDemo && (
+          <button
+            onClick={onSkipAsDemo}
+            style={{marginTop:12,width:'100%',padding:'10px',background:'none',color:'#888',border:'1px dashed #EAE8E4',borderRadius:10,fontSize:12,cursor:'pointer'}}
+          >Continue without an account (demo mode)</button>
+        )}
+      </div>
+
+      <p style={{marginTop:20,textAlign:'center',fontSize:11,color:'#9B9B9B'}}>
+        By creating an account you consent to sharing your wellness logs with your HYDR801 provider.
+      </p>
+    </div>
+  );
+}
+
 function OnboardingFlow({ onComplete }) {
   const [step, setStep] = useState(0);
 
@@ -1170,7 +1775,31 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
-  
+
+  // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
+  // was logged in previous sessions today, not the stale starting values.
+  // Also recompute the streak so it accounts for any missed-day grace.
+  useEffect(() => {
+    const entries = loadFoodLog(todayKey());
+    let protein = 0, fiber = 0;
+    entries.forEach(e => {
+      const s = e.servings || 1;
+      protein += (e.protein || 0) * s;
+      fiber += (e.fiber || 0) * s;
+    });
+    const nextProtein = Math.round(protein);
+    const nextFiber = Math.round(fiber);
+    const nextStreak = computeStreak();
+    if (
+      user.proteinCurrent !== nextProtein ||
+      user.fiberCurrent !== nextFiber ||
+      user.currentStreak !== nextStreak
+    ) {
+      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, currentStreak: nextStreak });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const greeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -1214,7 +1843,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   }
 
   if (showFoodLog) {
-    return <FoodLogScreen user={user} onBack={() => setShowFoodLog(false)} />;
+    return <FoodLogScreen user={user} setUser={setUser} onBack={() => setShowFoodLog(false)} />;
   }
 
   return (
@@ -1248,6 +1877,9 @@ function HomeScreen({ user, setUser, setActiveModal }) {
       {/* Calendar with Injection Tracking - TOP */}
       <HomeCalendar user={user} setUser={setUser} />
 
+      {/* Your Progress — patient-visible compliance + streak */}
+      <ComplianceCard user={user} />
+
       {/* This Week's Guidance */}
       <div style={styles.weekGuidanceCard}>
         <div style={styles.weekGuidanceHeader}>
@@ -1271,7 +1903,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.waterGoal}
             unit="oz"
             color="#2AABB3"
-            onIncrement={() => setUser({...user, waterCurrent: Math.min(user.waterCurrent + 8, user.waterGoal)})}
+            onIncrement={() => { markActiveToday(); setUser({...user, waterCurrent: Math.min(user.waterCurrent + 8, user.waterGoal), currentStreak: computeStreak()}); }}
           />
           <GoalCard
             icon={<ProteinIcon />}
@@ -1280,7 +1912,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.proteinGoal}
             unit="g"
             color="#4A6741"
-            onIncrement={() => setUser({...user, proteinCurrent: Math.min(user.proteinCurrent + 10, user.proteinGoal)})}
+            lockedHint="Log in Food Log"
           />
           <GoalCard
             icon={<FiberIcon />}
@@ -1289,7 +1921,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.fiberGoal}
             unit="g"
             color="#C4956A"
-            onIncrement={() => setUser({...user, fiberCurrent: Math.min(user.fiberCurrent + 5, user.fiberGoal)})}
+            lockedHint="Log in Food Log"
           />
           <GoalCard
             icon={<ExerciseIcon />}
@@ -1298,7 +1930,7 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.exerciseGoal}
             unit="min"
             color="#9B7E9B"
-            onIncrement={() => setUser({...user, exerciseCurrent: Math.min(user.exerciseCurrent + 10, user.exerciseGoal)})}
+            lockedHint="Log in Fitness"
           />
         </div>
       </section>
@@ -1850,11 +2482,116 @@ function HomeCalendar({ user, setUser }) {
 }
 
 // Goal Card Component
-function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
-  const percentage = Math.round((current / goal) * 100);
-  
+// Patient-facing compliance + streak card. Compliance is the same number the
+// provider sees: average of protein/water/exercise/meals across the latest
+// week in weeklyHistory. If history is empty, derive from today's progress
+// so brand-new patients see something useful.
+function ComplianceCard({ user }) {
+  const wh = Array.isArray(user.weeklyHistory) ? user.weeklyHistory : [];
+  const last = wh.length ? wh[wh.length - 1] : null;
+  const prev = wh.length > 1 ? wh[wh.length - 2] : null;
+
+  let compliance;
+  if (last) {
+    const parts = ['protein','water','exercise','meals']
+      .map(k => Number(last[k]))
+      .filter(n => Number.isFinite(n));
+    compliance = parts.length ? Math.round(parts.reduce((s,n) => s+n, 0) / parts.length) : 0;
+  } else {
+    const protein = user.proteinGoal ? (user.proteinCurrent / user.proteinGoal) * 100 : 0;
+    const water = user.waterGoal ? (user.waterCurrent / user.waterGoal) * 100 : 0;
+    const exercise = user.exerciseGoal ? (user.exerciseCurrent / user.exerciseGoal) * 100 : 0;
+    compliance = Math.round((protein + water + exercise) / 3);
+  }
+  compliance = Math.max(0, Math.min(100, compliance));
+
+  let prevCompliance = null;
+  if (prev) {
+    const parts = ['protein','water','exercise','meals']
+      .map(k => Number(prev[k]))
+      .filter(n => Number.isFinite(n));
+    prevCompliance = parts.length ? Math.round(parts.reduce((s,n) => s+n, 0) / parts.length) : null;
+  }
+  const delta = prevCompliance != null ? compliance - prevCompliance : null;
+
+  const ringColor = compliance >= 80 ? '#4A6741' : compliance >= 60 ? '#C4956A' : '#9B7E60';
+  const ringSize = 72;
+  const ringStroke = 8;
+  const ringRadius = (ringSize - ringStroke) / 2;
+  const ringCirc = 2 * Math.PI * ringRadius;
+  const ringOffset = ringCirc - (compliance / 100) * ringCirc;
+
   return (
-    <div style={styles.goalCard} className="card-hover" onClick={onIncrement}>
+    <div style={{
+      background: '#fff',
+      borderRadius: 16,
+      padding: 16,
+      margin: '0 0 16px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16,
+      boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+    }}>
+      <div style={{position: 'relative', width: ringSize, height: ringSize, flexShrink: 0}}>
+        <svg width={ringSize} height={ringSize}>
+          <circle cx={ringSize/2} cy={ringSize/2} r={ringRadius} fill="none" stroke="#EAE8E4" strokeWidth={ringStroke} />
+          <circle
+            cx={ringSize/2} cy={ringSize/2} r={ringRadius}
+            fill="none" stroke={ringColor} strokeWidth={ringStroke} strokeLinecap="round"
+            strokeDasharray={ringCirc} strokeDashoffset={ringOffset}
+            transform={`rotate(-90 ${ringSize/2} ${ringSize/2})`}
+            style={{transition: 'stroke-dashoffset 0.6s ease'}}
+          />
+        </svg>
+        <div style={{position: 'absolute', top: 0, left: 0, width: ringSize, height: ringSize, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column'}}>
+          <span style={{fontSize: 18, fontWeight: 700, color: ringColor, lineHeight: 1}}>{compliance}%</span>
+        </div>
+      </div>
+      <div style={{flex: 1, minWidth: 0}}>
+        <p style={{fontSize: 12, color: '#9B9B9B', margin: 0, textTransform: 'uppercase', letterSpacing: 0.4}}>Your Progress</p>
+        <p style={{fontSize: 15, fontWeight: 600, color: '#2B2B2B', margin: '2px 0 0'}}>
+          {compliance >= 85 ? "You're crushing it" : compliance >= 70 ? 'On track' : compliance >= 50 ? 'Keep going' : "Let's get you back on track"}
+        </p>
+        <div style={{display: 'flex', alignItems: 'center', gap: 10, marginTop: 6, flexWrap: 'wrap'}}>
+          <span style={{fontSize: 12, color: '#666'}}>🔥 {user.currentStreak || 0}-day streak</span>
+          {delta != null && delta !== 0 && (
+            <span style={{fontSize: 11, color: delta > 0 ? '#4A6741' : '#C4956A', fontWeight: 600}}>
+              {delta > 0 ? '▲' : '▼'} {Math.abs(delta)}% vs last week
+            </span>
+          )}
+          {(() => {
+            // Grace indicator: show whether the patient still has their
+            // missed-day pass available this 7-day window.
+            const map = loadActiveDays();
+            const today = new Date();
+            let misses = 0;
+            for (let i = 0; i < 7; i++) {
+              const d = new Date(today); d.setDate(d.getDate() - i);
+              if (!map[dateKey(d)]) misses += 1;
+            }
+            // Today not yet logged doesn't count as a miss
+            const todayMissing = !map[dateKey(today)];
+            const effectiveMisses = Math.max(0, misses - (todayMissing ? 1 : 0));
+            return effectiveMisses === 0
+              ? <span style={{fontSize: 11, color: '#888'}} title="One missed day per week is OK">🛟 grace day saved</span>
+              : <span style={{fontSize: 11, color: '#C4956A'}} title="Grace day used — next miss breaks the streak">⚠️ grace day used</span>;
+          })()}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint }) {
+  const percentage = Math.round((current / goal) * 100);
+  const interactive = typeof onIncrement === 'function';
+
+  return (
+    <div
+      style={{...styles.goalCard, cursor: interactive ? 'pointer' : 'default'}}
+      className={interactive ? 'card-hover' : ''}
+      onClick={interactive ? onIncrement : undefined}
+    >
       <div style={styles.goalHeader}>
         <div style={{...styles.goalIcon, backgroundColor: `${color}15`}}>
           {React.cloneElement(icon, { color })}
@@ -1863,7 +2600,7 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <div style={styles.goalProgress}>
         <div style={styles.progressBar}>
-          <div 
+          <div
             className="progress-bar-fill"
             style={{
               ...styles.progressFill,
@@ -1875,6 +2612,9 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement }) {
       </div>
       <p style={styles.goalLabel}>{label}</p>
       <p style={styles.goalValue}>{current}<span style={styles.goalUnit}>/{goal}{unit}</span></p>
+      {!interactive && lockedHint && (
+        <p style={{fontSize: 10, color: '#9B9B9B', margin: '4px 0 0', fontStyle: 'italic'}}>{lockedHint}</p>
+      )}
     </div>
   );
 }
@@ -5501,11 +6241,13 @@ function FitnessScreen({ user, setUser }) {
         user={user}
         onComplete={() => {
           setShowWorkoutPlayer(false);
+          markActiveToday();
           // Award points for completing workout
           setUser({
             ...user,
             totalPoints: (user.totalPoints || 0) + 100,
-            exerciseCurrent: user.exerciseGoal // Mark as completed
+            exerciseCurrent: user.exerciseGoal, // Mark as completed
+            currentStreak: computeStreak(),
           });
         }}
         onExit={() => setShowWorkoutPlayer(false)}
@@ -8109,7 +8851,7 @@ function LoyaltyProgramScreen({ user, setUser, onBack }) {
 }
 
 // Profile Screen
-function ProfileScreen({ user, setUser }) {
+function ProfileScreen({ user, setUser, onLogout, authProfile }) {
   const [showWeightLog, setShowWeightLog] = useState(false);
   const [showLoyalty, setShowLoyalty] = useState(false);
   const [activeSubscreen, setActiveSubscreen] = useState(null);
@@ -8551,16 +9293,42 @@ function ProfileScreen({ user, setUser }) {
 
   // Notifications Subscreen
   if (activeSubscreen === 'notifications') {
+    const notifSupported = typeof window !== 'undefined' && 'Notification' in window;
+    const notifPermission = notifSupported ? Notification.permission : 'unsupported';
     return (
       <div style={styles.screenContent} className="fade-in">
         <div style={styles.subscreenHeader}>
           <button style={styles.backButton} onClick={() => setActiveSubscreen(null)}>← Back</button>
           <h2 style={styles.subscreenTitle}>Notifications</h2>
         </div>
-        
+
         <div style={styles.notificationsSection}>
+          {/* Permission banner */}
+          {notifPermission === 'default' && (
+            <div style={{padding: 14, background: '#F0F4EE', borderRadius: 12, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12}}>
+              <div style={{flex: 1}}>
+                <p style={{fontWeight: 600, fontSize: 13, margin: 0, color: '#4A6741'}}>Enable push reminders</p>
+                <p style={{fontSize: 12, color: '#666', margin: '2px 0 0'}}>Allow notifications so HYDR801 can remind you on injection day, hydration, and meals.</p>
+              </div>
+              <button
+                style={{padding: '8px 14px', background: '#4A6741', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer'}}
+                onClick={() => { try { Notification.requestPermission(); } catch {} }}
+              >Enable</button>
+            </div>
+          )}
+          {notifPermission === 'denied' && (
+            <div style={{padding: 12, background: '#FFF5F0', borderRadius: 12, marginBottom: 16}}>
+              <p style={{fontSize: 12, color: '#9B7E60', margin: 0}}>Notifications are blocked in your browser settings. Enable them there to receive reminders.</p>
+            </div>
+          )}
+          {notifPermission === 'unsupported' && (
+            <div style={{padding: 12, background: '#F5F5F5', borderRadius: 12, marginBottom: 16}}>
+              <p style={{fontSize: 12, color: '#888', margin: 0}}>This browser doesn't support notifications.</p>
+            </div>
+          )}
+
           <h4 style={styles.notificationsSectionTitle}>Reminders</h4>
-          
+
           <div style={styles.notificationRow}>
             <div style={styles.notificationInfo}>
               <span style={styles.notificationIcon}>💉</span>
@@ -8947,7 +9715,18 @@ function ProfileScreen({ user, setUser }) {
         ))}
       </div>
 
-      <button style={styles.signOutButton}>Sign Out</button>
+      {authProfile && (
+        <p style={{textAlign:'center',fontSize:11,color:'#9B9B9B',margin:'8px 0'}}>
+          Signed in as <strong style={{color:'#666'}}>{authProfile.email}</strong>
+        </p>
+      )}
+      <button
+        style={styles.signOutButton}
+        onClick={() => {
+          if (typeof window !== 'undefined' && !window.confirm('Sign out of HYDR801?')) return;
+          onLogout && onLogout();
+        }}
+      >Sign Out</button>
     </div>
   );
 }
@@ -9486,7 +10265,7 @@ const saveFoodLog = (dateKey, entries) => {
 // Pull cal/protein/carbs/fat from USDA foodNutrients (the API uses two slightly
 // different shapes depending on search vs detail endpoints, so check both).
 const extractNutrients = (food) => {
-  const out = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const out = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   const nutrients = food?.foodNutrients || [];
   for (const n of nutrients) {
     const id = n.nutrientId ?? n.nutrient?.id;
@@ -9496,14 +10275,16 @@ const extractNutrients = (food) => {
     else if (id === 1003 || name === 'protein') out.protein = Math.round(value * 10) / 10;
     else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
     else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
+    else if (id === 1079 || name.includes('fiber')) out.fiber = Math.round(value * 10) / 10;
   }
   return out;
 };
 
-function FoodLogScreen({ user, onBack }) {
+function FoodLogScreen({ user, setUser, onBack }) {
   const [dateKey] = useState(todayKey());
   const [entries, setEntries] = useState([]);
   const [showAdd, setShowAdd] = useState(null); // meal name to add to, or null
+  const [showPhoto, setShowPhoto] = useState(false); // camera/AI flow
 
   useEffect(() => {
     setEntries(loadFoodLog(dateKey));
@@ -9520,17 +10301,41 @@ function FoodLogScreen({ user, onBack }) {
       acc.protein += e.protein * e.servings;
       acc.carbs += e.carbs * e.servings;
       acc.fat += e.fat * e.servings;
+      acc.fiber += (e.fiber || 0) * e.servings;
       return acc;
     },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
   );
 
+  // Daily Goals (Protein & Fiber) are derived from the food log — push the
+  // running totals back up so HomeScreen reflects what's been logged.
+  useEffect(() => {
+    if (!setUser) return;
+    const nextProtein = Math.round(totals.protein);
+    const nextFiber = Math.round(totals.fiber);
+    if (user.proteinCurrent === nextProtein && user.fiberCurrent === nextFiber) return;
+    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
+  }, [totals.protein, totals.fiber, setUser]);
+
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
+  const [recents, setRecents] = useState([]);
+  useEffect(() => { setRecents(loadRecentFoods()); }, []);
 
   const addEntry = (mealName, food) => {
-    const next = [...entries, { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` }];
+    const entry = { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` };
+    const next = [...entries, entry];
     persist(next);
+    pushRecentFood(food);
+    setRecents(loadRecentFoods());
+    markActiveToday();
+    if (setUser) setUser({ ...user, currentStreak: computeStreak() });
     setShowAdd(null);
+  };
+
+  // Quick-add a recent food directly to a meal (default to Snacks when the
+  // patient is on the main food log view).
+  const quickAddRecent = (food) => {
+    addEntry('Snacks', { ...food, servings: 1 });
   };
 
   const removeEntry = (id) => {
@@ -9568,6 +10373,61 @@ function FoodLogScreen({ user, onBack }) {
         </div>
       </div>
 
+      {/* Snap a meal — AI-assisted photo logging */}
+      <button
+        onClick={() => setShowPhoto(true)}
+        style={{
+          width: '100%',
+          marginTop: 12,
+          padding: '14px 16px',
+          background: 'linear-gradient(135deg, #4A6741 0%, #5B7B50 100%)',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 12,
+          fontSize: 14,
+          fontWeight: 600,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+          boxShadow: '0 2px 8px rgba(74,103,65,0.25)',
+        }}
+      >
+        <span style={{fontSize: 18}}>📷</span> Snap a meal — auto-log nutrition
+      </button>
+
+      {/* Recently logged — one-tap add to Snacks */}
+      {recents.length > 0 && (
+        <section style={styles.section}>
+          <h3 style={styles.sectionTitle}>Quick add</h3>
+          <div style={{display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginLeft: -4, paddingLeft: 4}}>
+            {recents.map((r, idx) => (
+              <button
+                key={idx}
+                onClick={() => quickAddRecent(r)}
+                style={{
+                  flex: '0 0 auto',
+                  background: '#fff',
+                  border: '1px solid #EAE8E4',
+                  borderRadius: 12,
+                  padding: '10px 12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  minWidth: 140,
+                  maxWidth: 200,
+                }}
+                title={`Add to Snacks: ${r.name}`}
+              >
+                <p style={{fontSize: 12, fontWeight: 600, margin: 0, color: '#2B2B2B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{r.name}</p>
+                <p style={{fontSize: 11, color: '#888', margin: '2px 0 0'}}>{Math.round(r.calories)} cal · P {Math.round(r.protein)}g</p>
+                <p style={{fontSize: 10, color: '#4A6741', margin: '4px 0 0', fontWeight: 600}}>＋ Tap to add</p>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {meals.map(meal => {
         const mealEntries = entries.filter(e => e.meal === meal);
         const mealCals = mealEntries.reduce((s, e) => s + e.calories * e.servings, 0);
@@ -9604,6 +10464,16 @@ function FoodLogScreen({ user, onBack }) {
           onAdd={(food) => addEntry(showAdd, food)}
         />
       )}
+
+      {showPhoto && (
+        <PhotoFoodModal
+          onClose={() => setShowPhoto(false)}
+          onConfirm={(mealName, foods) => {
+            foods.forEach(f => addEntry(mealName, f));
+            setShowPhoto(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -9617,6 +10487,8 @@ function AddFoodModal({ meal, onClose, onAdd }) {
   const [servings, setServings] = useState('1');
   const [showCustom, setShowCustom] = useState(false);
   const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
+  const [recents, setRecents] = useState([]);
+  useEffect(() => { setRecents(loadRecentFoods()); }, []);
   const searchTimeoutRef = useRef(null);
 
   useEffect(() => {
@@ -9766,6 +10638,26 @@ function AddFoodModal({ meal, onClose, onAdd }) {
             />
             {loading && <p style={styles.foodModalHint}>Searching USDA database…</p>}
             {error && <p style={styles.foodModalError}>{error}</p>}
+            {!query.trim() && recents.length > 0 && (
+              <div style={{marginTop: 8}}>
+                <p style={{fontSize: 11, fontWeight: 600, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.5, margin: '4px 0 8px'}}>Recently added</p>
+                <div style={styles.foodResultsList}>
+                  {recents.map((r, idx) => (
+                    <button
+                      key={idx}
+                      style={styles.foodResultItem}
+                      onClick={() => onAdd({ ...r, servings: 1 })}
+                    >
+                      <span style={styles.foodResultName}>{r.name}</span>
+                      <span style={styles.foodResultMacros}>
+                        {Math.round(r.calories)} cal · P {Math.round(r.protein)}g · C {Math.round(r.carbs)}g · F {Math.round(r.fat)}g
+                        <span style={styles.foodResultPer}> per {r.servingLabel || '1 serving'}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={styles.foodResultsList}>
               {results.map((food) => {
                 const macros = extractNutrients(food);
@@ -9786,6 +10678,359 @@ function AddFoodModal({ meal, onClose, onAdd }) {
             <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Resize + compress a chosen image to keep the vision API upload small.
+// Returns { dataUrl, base64, mimeType } at JPEG quality 0.85, max edge 1280px.
+async function compressImageForVision(file, maxEdge = 1280, quality = 0.85) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+  const outDataUrl = canvas.toDataURL('image/jpeg', quality);
+  return {
+    dataUrl: outDataUrl,
+    base64: outDataUrl.replace(/^data:image\/\w+;base64,/, ''),
+    mimeType: 'image/jpeg',
+  };
+}
+
+// Snap-a-meal flow: capture a photo, send to Claude vision, let the patient
+// confirm/edit the parsed items, then write them to the food log.
+function PhotoFoodModal({ onClose, onConfirm }) {
+  const [stage, setStage] = useState('capture'); // capture | analyzing | review | error
+  const [preview, setPreview] = useState(null);
+  const [base64, setBase64] = useState(null);
+  const [mimeType, setMimeType] = useState('image/jpeg');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState(null);
+  const [items, setItems] = useState([]);
+  const [mealGuess, setMealGuess] = useState('Snacks');
+  const [summary, setSummary] = useState('');
+  const [warnings, setWarnings] = useState([]);
+  const fileInputRef = useRef(null);
+
+  const pickFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setError('Please choose an image file.');
+      return;
+    }
+    setError(null);
+    compressImageForVision(file).then(({ dataUrl, base64: b64, mimeType: mt }) => {
+      setPreview(dataUrl);
+      setBase64(b64);
+      setMimeType(mt);
+    }).catch(() => setError('Could not read that image.'));
+  };
+
+  const analyze = async () => {
+    if (!base64) return;
+    setStage('analyzing');
+    setError(null);
+    try {
+      const token = authApi.loadToken();
+      if (!token) {
+        setStage('error');
+        setError('Please sign in before using photo logging.');
+        return;
+      }
+      const r = await fetch(`${PROVIDER_API_BASE}/api/food-vision`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ image: base64, mimeType, note }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setStage('error');
+        setError(data.error || `Could not analyze photo (${r.status})`);
+        return;
+      }
+      if (!data.items?.length) {
+        setStage('error');
+        setError(data.summary || 'No food detected in the photo. Try again with better lighting.');
+        return;
+      }
+      // Default servings = 1 for everything; patient can adjust before saving.
+      setItems(data.items.map(it => ({ ...it, _include: true, _servings: 1 })));
+      setMealGuess(data.mealGuess || 'Snacks');
+      setSummary(data.summary || '');
+      setWarnings(data.warnings || []);
+      setStage('review');
+    } catch (err) {
+      setStage('error');
+      setError(err.message || 'Photo analysis failed.');
+    }
+  };
+
+  const confirm = () => {
+    const chosen = items
+      .filter(it => it._include && (it.name || '').trim())
+      .map(it => ({
+        name: it.name.trim(),
+        servingLabel: (it.servingLabel || '1 serving').trim(),
+        calories: Number(it.calories) || 0,
+        protein: Number(it.protein) || 0,
+        carbs: Number(it.carbs) || 0,
+        fat: Number(it.fat) || 0,
+        fiber: Number(it.fiber) || 0,
+        servings: Number(it._servings) || 1,
+      }));
+    if (chosen.length === 0) {
+      setError('Select at least one item to log (and give every item a name).');
+      return;
+    }
+    onConfirm(mealGuess, chosen);
+  };
+
+  const totals = items
+    .filter(i => i._include)
+    .reduce((acc, i) => {
+      const s = Number(i._servings) || 1;
+      acc.calories += i.calories * s;
+      acc.protein += i.protein * s;
+      return acc;
+    }, { calories: 0, protein: 0 });
+
+  return (
+    <div style={styles.foodModalBackdrop} onClick={onClose}>
+      <div style={styles.foodModal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.foodModalHeader}>
+          <h2 style={styles.foodModalTitle}>📷 Snap a Meal</h2>
+          <button style={styles.foodModalClose} onClick={onClose}>×</button>
+        </div>
+
+        <div style={styles.foodModalBody}>
+          {stage === 'capture' && (
+            <>
+              {!preview ? (
+                <div style={{textAlign:'center',padding:'24px 0'}}>
+                  <div style={{fontSize:48,marginBottom:12}}>🍽️</div>
+                  <p style={{fontSize:13,color:'#666',marginBottom:18}}>
+                    Take a clear photo of your plate. We'll identify each item and estimate the nutrition for you.
+                  </p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={pickFile}
+                    style={{display:'none'}}
+                  />
+                  <button
+                    style={{...styles.primaryButton, marginBottom: 10}}
+                    onClick={() => fileInputRef.current?.click()}
+                  >📷 Take photo</button>
+                  <p style={{fontSize:11,color:'#9B9B9B'}}>You can also choose an existing photo.</p>
+                </div>
+              ) : (
+                <>
+                  <div style={{position:'relative',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                    <img src={preview} alt="Meal" style={{width:'100%',display:'block',maxHeight:280,objectFit:'cover'}} />
+                  </div>
+                  <label style={styles.foodModalLabel}>Add a note (optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. half a portion, no dressing"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    style={styles.foodModalInput}
+                    maxLength={200}
+                  />
+                  {error && <p style={styles.foodModalError}>{error}</p>}
+                  <button style={styles.primaryButton} onClick={analyze}>Analyze nutrition →</button>
+                  <button
+                    style={styles.secondaryButton}
+                    onClick={() => { setPreview(null); setBase64(null); setNote(''); }}
+                  >Retake photo</button>
+                </>
+              )}
+              {error && !preview && <p style={styles.foodModalError}>{error}</p>}
+            </>
+          )}
+
+          {stage === 'analyzing' && (
+            <div style={{textAlign:'center',padding:'40px 0'}}>
+              <div style={{fontSize:40,marginBottom:12}}>🔍</div>
+              <p style={{fontSize:14,color:'#4A6741',fontWeight:600,marginBottom:6}}>Analyzing your meal…</p>
+              <p style={{fontSize:12,color:'#888'}}>Identifying foods and estimating nutrition.</p>
+            </div>
+          )}
+
+          {stage === 'error' && (
+            <div style={{padding:'12px 0'}}>
+              <p style={styles.foodModalError}>{error}</p>
+              <button style={styles.primaryButton} onClick={() => { setStage('capture'); setError(null); }}>Try again</button>
+            </div>
+          )}
+
+          {stage === 'review' && (
+            <>
+              {preview && (
+                <img src={preview} alt="Meal" style={{width:'100%',display:'block',maxHeight:140,objectFit:'cover',borderRadius:10,marginBottom:12}} />
+              )}
+              {summary && <p style={{fontSize:12,color:'#666',marginBottom:8,fontStyle:'italic'}}>"{summary}"</p>}
+
+              <label style={styles.foodModalLabel}>Meal</label>
+              <select
+                value={mealGuess}
+                onChange={(e) => setMealGuess(e.target.value)}
+                style={{...styles.foodModalInput, appearance:'auto'}}
+              >
+                {['Breakfast','Lunch','Dinner','Snacks'].map(m => <option key={m}>{m}</option>)}
+              </select>
+
+              <div style={{margin:'12px 0 6px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={styles.foodModalLabel}>Detected items — edit anything wrong</span>
+                <button
+                  type="button"
+                  onClick={() => setItems([...items, {
+                    name: '', servingLabel: '1 serving',
+                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0,
+                    confidence: 'low',
+                    _include: true, _servings: 1, _editing: true, _manual: true,
+                  }])}
+                  style={{fontSize:11,color:'#4A6741',background:'none',border:'1px dashed #4A6741',borderRadius:6,padding:'3px 8px',cursor:'pointer'}}
+                >+ Add missing item</button>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:340,overflow:'auto',marginBottom:12}}>
+                {items.map((it, idx) => {
+                  const updateItem = (patch) => setItems(items.map((x,i) => i === idx ? { ...x, ...patch } : x));
+                  const removeItem = () => setItems(items.filter((_, i) => i !== idx));
+                  const numInput = (key, label, width = 56) => (
+                    <label style={{display:'flex',flexDirection:'column',gap:2,minWidth:0}}>
+                      <span style={{fontSize:9,color:'#888',textTransform:'uppercase',letterSpacing:0.4}}>{label}</span>
+                      <input
+                        type="number" min="0" step="0.1"
+                        value={it[key] ?? 0}
+                        onChange={(e) => updateItem({ [key]: Math.max(0, Number(e.target.value) || 0) })}
+                        style={{width,padding:'5px 6px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                      />
+                    </label>
+                  );
+                  return (
+                    <div key={idx} style={{padding:10,background:it._include ? '#F0F4EE' : '#F7F6F4',borderRadius:10,opacity:it._include ? 1 : 0.55}}>
+                      <div style={{display:'flex',alignItems:'flex-start',gap:10}}>
+                        <input
+                          type="checkbox"
+                          checked={it._include}
+                          onChange={(e) => updateItem({ _include: e.target.checked })}
+                          style={{flexShrink:0,marginTop:3}}
+                        />
+                        <div style={{flex:1,minWidth:0}}>
+                          {it._editing ? (
+                            <input
+                              type="text"
+                              value={it.name}
+                              autoFocus={it._manual}
+                              onChange={(e) => updateItem({ name: e.target.value })}
+                              placeholder="Food name (e.g. Grilled chicken)"
+                              style={{width:'100%',padding:'6px 8px',border:'1px solid #c5d6be',borderRadius:6,fontSize:13,fontWeight:600,background:'#fff',color:'#2B2B2B'}}
+                            />
+                          ) : (
+                            <p style={{fontSize:13,fontWeight:600,margin:0,color:'#2B2B2B',wordBreak:'break-word'}}>{it.name || '(no name)'}</p>
+                          )}
+                          {!it._editing && (
+                            <p style={{fontSize:11,color:'#666',margin:'2px 0 0'}}>
+                              {it.calories} cal · P {it.protein}g · C {it.carbs}g · F {it.fat}g
+                              <span style={{marginLeft:6,color:'#888'}}>per {it.servingLabel}</span>
+                            </p>
+                          )}
+                          {!it._editing && !it._manual && (
+                            <p style={{fontSize:10,color:it.confidence === 'high' ? '#16a34a' : it.confidence === 'medium' ? '#C4956A' : '#9B7E60',margin:'2px 0 0',fontWeight:600,textTransform:'uppercase',letterSpacing:0.4}}>
+                              {it.confidence} confidence
+                            </p>
+                          )}
+                        </div>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.25"
+                          value={it._servings}
+                          onChange={(e) => updateItem({ _servings: e.target.value })}
+                          style={{width:54,padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                          title="Servings"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateItem({ _editing: !it._editing })}
+                          title={it._editing ? 'Done editing' : 'Edit nutrition'}
+                          style={{background:'none',border:'none',cursor:'pointer',padding:4,fontSize:14,color:it._editing ? '#4A6741' : '#888'}}
+                        >{it._editing ? '✓' : '✏️'}</button>
+                      </div>
+
+                      {it._editing && (
+                        <div style={{marginTop:10,paddingTop:10,borderTop:'1px solid #d8e3d3'}}>
+                          <label style={{display:'block',marginBottom:8}}>
+                            <span style={{fontSize:9,color:'#888',textTransform:'uppercase',letterSpacing:0.4,display:'block',marginBottom:2}}>Serving size label</span>
+                            <input
+                              type="text"
+                              value={it.servingLabel}
+                              onChange={(e) => updateItem({ servingLabel: e.target.value })}
+                              placeholder="e.g. 6 oz, 1 cup, 1 piece"
+                              style={{width:'100%',padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
+                            />
+                          </label>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(5, 1fr)',gap:6}}>
+                            {numInput('calories', 'Cal')}
+                            {numInput('protein', 'Protein g')}
+                            {numInput('carbs', 'Carbs g')}
+                            {numInput('fat', 'Fat g')}
+                            {numInput('fiber', 'Fiber g')}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={removeItem}
+                            style={{marginTop:10,background:'none',border:'none',color:'#b91c1c',fontSize:11,cursor:'pointer',padding:0}}
+                          >🗑️ Remove this item</button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {warnings.length > 0 && (
+                <div style={{padding:'8px 10px',background:'#FFF8E6',borderRadius:8,marginBottom:10,fontSize:11,color:'#9B7E60'}}>
+                  {warnings.map((w,i) => <div key={i}>⚠️ {w}</div>)}
+                </div>
+              )}
+
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'#F0F4EE',borderRadius:10,marginBottom:12}}>
+                <span style={{fontSize:12,color:'#666'}}>Total to log</span>
+                <span style={{fontSize:14,fontWeight:700,color:'#4A6741'}}>{Math.round(totals.calories)} cal · {Math.round(totals.protein)}g protein</span>
+              </div>
+
+              {error && <p style={styles.foodModalError}>{error}</p>}
+              <button style={styles.primaryButton} onClick={confirm}>Add to {mealGuess}</button>
+              <button
+                style={styles.secondaryButton}
+                onClick={() => { setStage('capture'); setError(null); }}
+              >← Retake or pick a different photo</button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
