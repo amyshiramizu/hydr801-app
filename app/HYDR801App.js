@@ -310,6 +310,45 @@ const authApi = {
   },
 };
 
+// Patient-side calls for the five new health-tools endpoints. Every call
+// attaches the patient_app_sessions Bearer token automatically and resolves
+// to JSON (throwing on non-2xx with the server's error message).
+const healthApi = {
+  _call: async (path, opts = {}) => {
+    const token = authApi.loadToken();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(`${PROVIDER_API_BASE}${path}`, { ...opts, headers });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `${r.status} ${r.statusText}`);
+    return data;
+  },
+  weights: {
+    list: () => healthApi._call('/api/patient-weights'),
+    post: (entry) => healthApi._call('/api/patient-weights', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-weights?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    scaleOcr: (image, mimeType = 'image/jpeg') =>
+      healthApi._call('/api/scale-ocr', { method: 'POST', body: JSON.stringify({ image, mimeType }) }),
+  },
+  symptoms: {
+    list: () => healthApi._call('/api/patient-symptoms'),
+    post: (entry) => healthApi._call('/api/patient-symptoms', { method: 'POST', body: JSON.stringify(entry) }),
+  },
+  photos: {
+    list: (includeImage = false) => healthApi._call(`/api/patient-progress-photos${includeImage ? '?include_image=1' : ''}`),
+    get: (id) => healthApi._call(`/api/patient-progress-photos?id=${encodeURIComponent(id)}`),
+    post: (entry) => healthApi._call('/api/patient-progress-photos', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-progress-photos?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
+  labs: {
+    dashboard: () => healthApi._call('/api/patient-labs'),
+    explain: (resultId) => healthApi._call('/api/lab-explainer', { method: 'POST', body: JSON.stringify({ resultId }) }),
+  },
+  mealCoach: {
+    summary: (force = false) => healthApi._call('/api/meal-coach', { method: 'POST', body: JSON.stringify({ force }) }),
+  },
+};
+
 // Default state for a brand-new patient (used when their saved state is empty).
 // Mirrors the mock state HYDR801App used to start with.
 function defaultPatientState(profile) {
@@ -1775,6 +1814,7 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
+  const [tool, setTool] = useState(null); // weight | symptoms | photos | labs | coach
 
   // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
   // was logged in previous sessions today, not the stale starting values.
@@ -1845,6 +1885,12 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   if (showFoodLog) {
     return <FoodLogScreen user={user} setUser={setUser} onBack={() => setShowFoodLog(false)} />;
   }
+
+  if (tool === 'weight')   return <WeightLogScreen onBack={() => setTool(null)} />;
+  if (tool === 'symptoms') return <SymptomsScreen onBack={() => setTool(null)} />;
+  if (tool === 'photos')   return <ProgressPhotosScreen onBack={() => setTool(null)} />;
+  if (tool === 'labs')     return <LabsScreen onBack={() => setTool(null)} />;
+  if (tool === 'coach')    return <MealCoachScreen onBack={() => setTool(null)} />;
 
   return (
     <div style={styles.screenContent} className="fade-in">
@@ -1966,6 +2012,9 @@ function HomeScreen({ user, setUser, setActiveModal }) {
           </div>
         </div>
       </section>
+
+      {/* Track Your Progress: 5 health-tools entry cards */}
+      <HealthToolsSection onOpen={(t) => setTool(t)} />
     </div>
   );
 }
@@ -18994,3 +19043,745 @@ const styles = {
     gap: '10px',
   },
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// Health Tools — five self-contained screens patient can reach from Home.
+// Each screen carries its own inline styles so it doesn't have to fight the
+// 19k-line styles object above. All five call the healthApi helper, which
+// rides the existing patient_app_sessions Bearer token.
+// ════════════════════════════════════════════════════════════════════════════
+
+const toolStyles = {
+  screen: { padding: '20px 18px 100px', overflowY: 'auto', height: '100%', background: '#FAFAF7' },
+  header: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 },
+  back: { background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', padding: 4, color: '#4A6741' },
+  title: { fontSize: 22, fontWeight: 600, margin: 0, fontFamily: 'Fraunces, serif', color: '#2C2C2C' },
+  card: { background: '#fff', border: '1px solid #E8E5DF', borderRadius: 14, padding: 16, marginBottom: 14, boxShadow: '0 1px 3px rgba(0,0,0,0.03)' },
+  label: { fontSize: 11, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 },
+  big: { fontSize: 32, fontWeight: 600, color: '#2C2C2C', fontFamily: 'Fraunces, serif' },
+  small: { fontSize: 12, color: '#6B6B6B' },
+  btnPrimary: { background: '#4A6741', color: '#fff', border: 'none', padding: '12px 18px', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer', width: '100%' },
+  btnSecondary: { background: '#fff', color: '#4A6741', border: '1px solid #4A6741', padding: '10px 16px', borderRadius: 10, fontSize: 13, fontWeight: 500, cursor: 'pointer', width: '100%', marginTop: 8 },
+  btnSubtle: { background: 'none', border: 'none', color: '#4A6741', fontSize: 13, cursor: 'pointer', padding: '6px 0' },
+  input: { width: '100%', padding: '12px 14px', border: '1px solid #E8E5DF', borderRadius: 10, fontSize: 16, color: '#2C2C2C', boxSizing: 'border-box', marginTop: 6 },
+  row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  badge: (color) => ({ display: 'inline-block', padding: '3px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600, background: color + '20', color }),
+  banner: (color) => ({ background: color + '12', border: `1px solid ${color}40`, borderLeft: `4px solid ${color}`, borderRadius: 8, padding: '12px 14px', marginBottom: 14 }),
+  errorText: { color: '#C24A4A', fontSize: 13, margin: '8px 0' },
+  empty: { textAlign: 'center', padding: '40px 20px', color: '#9B9B9B' },
+};
+
+const SEVERITY_COLOR = { green: '#4A6741', amber: '#C4956A', red: '#C24A4A' };
+const TONE_COLOR = { good: '#4A6741', watch: '#C4956A', concern: '#C24A4A', celebrate: '#4A6741', encourage: '#4A6741', redirect: '#C4956A' };
+
+function ToolHeader({ title, onBack }) {
+  return (
+    <div style={toolStyles.header}>
+      <button style={toolStyles.back} onClick={onBack} aria-label="Back">←</button>
+      <h1 style={toolStyles.title}>{title}</h1>
+    </div>
+  );
+}
+
+// ── Weight + body comp ─────────────────────────────────────────────────────
+function WeightLogScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [plateau, setPlateau] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showLog, setShowLog] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.weights.list();
+      setEntries(d.entries || []);
+      setPlateau(d.plateau || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const latest = entries[0];
+  const prev = entries[1];
+  const delta = latest && prev ? (latest.weightLbs - prev.weightLbs) : null;
+
+  // Sparkline: last 12 entries, scaled to 200x40
+  const spark = (() => {
+    const recent = entries.slice(0, 12).reverse();
+    if (recent.length < 2) return null;
+    const vals = recent.map(e => e.weightLbs);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const range = max - min || 1;
+    const pts = recent.map((e, i) => {
+      const x = (i / (recent.length - 1)) * 200;
+      const y = 40 - ((e.weightLbs - min) / range) * 36 - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return pts;
+  })();
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Weight & body comp" onBack={onBack} />
+
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {plateau?.plateau && (
+        <div style={toolStyles.banner('#C4956A')}>
+          <strong style={{ color: '#8B5E2F' }}>Weight stalled past {plateau.windowDays} days</strong>
+          <p style={{ ...toolStyles.small, margin: '4px 0 8px' }}>
+            Plateaus are normal — but they're often a sign it's time to look at dose, sleep, or strength training.
+          </p>
+          <button style={{ ...toolStyles.btnPrimary, background: '#C4956A' }}
+                  onClick={() => alert('Booking dose-review consult — coming soon')}>
+            Book a dose review
+          </button>
+        </div>
+      )}
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>Current</p>
+        <div style={toolStyles.row}>
+          <span style={toolStyles.big}>{latest ? `${latest.weightLbs.toFixed(1)} lbs` : '— lbs'}</span>
+          {delta != null && (
+            <span style={toolStyles.badge(delta < 0 ? '#4A6741' : delta > 0 ? '#C4956A' : '#9B9B9B')}>
+              {delta > 0 ? '+' : ''}{delta.toFixed(1)} lbs
+            </span>
+          )}
+        </div>
+        {latest?.bodyFatPct != null && (
+          <p style={{ ...toolStyles.small, marginTop: 6 }}>Body fat {latest.bodyFatPct}%
+            {latest.muscleLbs != null ? `  •  Muscle ${latest.muscleLbs} lbs` : ''}
+          </p>
+        )}
+        {spark && (
+          <svg viewBox="0 0 200 40" width="100%" height={40} style={{ marginTop: 10 }}>
+            <polyline fill="none" stroke="#4A6741" strokeWidth="2" points={spark} />
+          </svg>
+        )}
+        <p style={{ ...toolStyles.small, marginTop: 6 }}>Last {Math.min(entries.length, 12)} readings</p>
+      </div>
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowLog(true)}>+ Log weight</button>
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && entries.length === 0 && <p style={toolStyles.empty}>No weights logged yet. Tap “Log weight” above to start.</p>}
+      {entries.slice(0, 30).map(e => (
+        <div key={e.id} style={{ ...toolStyles.card, padding: '10px 14px' }}>
+          <div style={toolStyles.row}>
+            <div>
+              <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{e.weightLbs.toFixed(1)} lbs</strong>
+              {e.bodyFatPct != null && <span style={toolStyles.small}>  •  {e.bodyFatPct}% bf</span>}
+            </div>
+            <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+          </div>
+          {e.source !== 'manual' && <span style={{ ...toolStyles.small, fontSize: 10 }}>via {e.source}</span>}
+        </div>
+      ))}
+
+      {showLog && <WeightLogModal onClose={() => setShowLog(false)} onSaved={() => { setShowLog(false); refresh(); }} />}
+    </div>
+  );
+}
+
+function WeightLogModal({ onClose, onSaved }) {
+  const [stage, setStage] = useState('form'); // form | scanning | error
+  const [weightLbs, setWeightLbs] = useState('');
+  const [bodyFatPct, setBodyFatPct] = useState('');
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [source, setSource] = useState('manual');
+  const fileRef = useRef(null);
+
+  const pickScalePhoto = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    setStage('scanning');
+    compressImageForVision(file).then(async ({ base64, mimeType }) => {
+      try {
+        const d = await healthApi.weights.scaleOcr(base64, mimeType);
+        setWeightLbs(String(d.weightLbs));
+        if (d.bodyFatPct != null) setBodyFatPct(String(d.bodyFatPct));
+        setSource('scale-ocr');
+        setStage('form');
+      } catch (err) {
+        setError(err.message);
+        setStage('form');
+      }
+    }).catch(() => { setError('Could not read that image.'); setStage('form'); });
+  };
+
+  const save = async () => {
+    setError(null);
+    const w = Number(weightLbs);
+    if (!Number.isFinite(w) || w < 40 || w > 800) {
+      setError('Enter a weight between 40 and 800 lbs.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await healthApi.weights.post({
+        weightLbs: w,
+        bodyFatPct: bodyFatPct ? Number(bodyFatPct) : null,
+        source,
+      });
+      onSaved();
+    } catch (e) { setError(e.message); setSubmitting(false); }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'flex-end', zIndex: 1000 }} onClick={onClose}>
+      <div style={{ background: '#fff', width: '100%', maxWidth: 480, margin: '0 auto', borderRadius: '20px 20px 0 0', padding: 20 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Log a weight</h2>
+
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={pickScalePhoto}
+          style={{ display: 'none' }}
+        />
+        <button style={toolStyles.btnSecondary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
+          {stage === 'scanning' ? 'Reading scale…' : '📸 Scan my scale'}
+        </button>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Weight (lbs)</p>
+        <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1" min="40" max="800"
+               value={weightLbs} onChange={e => setWeightLbs(e.target.value)} placeholder="180.0" />
+
+        <p style={{ ...toolStyles.label, marginTop: 12 }}>Body fat % (optional)</p>
+        <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1"
+               value={bodyFatPct} onChange={e => setBodyFatPct(e.target.value)} placeholder="—" />
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 16 }} onClick={save} disabled={submitting}>
+          {submitting ? 'Saving…' : 'Save weight'}
+        </button>
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Symptom check-in ────────────────────────────────────────────────────────
+const SYMPTOM_FIELDS = [
+  { key: 'nausea', label: 'Nausea' },
+  { key: 'constipation', label: 'Constipation' },
+  { key: 'fatigue', label: 'Fatigue' },
+  { key: 'injectionSite', label: 'Injection site reaction' },
+  { key: 'headache', label: 'Headache' },
+];
+const SYMPTOM_LEVELS = ['None', 'Mild', 'Moderate', 'Severe'];
+
+function SymptomsScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [loggedToday, setLoggedToday] = useState(false);
+  const [scores, setScores] = useState({ nausea: 0, constipation: 0, fatigue: 0, injectionSite: 0, headache: 0 });
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [lastResult, setLastResult] = useState(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const d = await healthApi.symptoms.list();
+      setEntries(d.entries || []);
+      setLoggedToday(!!d.loggedToday);
+      if (d.latest) setLastResult({ entry: d.latest, upsells: [] });
+    } catch (e) { setError(e.message); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const submit = async () => {
+    setSubmitting(true); setError(null);
+    try {
+      const d = await healthApi.symptoms.post({ ...scores, otherNotes: notes });
+      setLastResult(d);
+      setLoggedToday(true);
+      setScores({ nausea: 0, constipation: 0, fatigue: 0, injectionSite: 0, headache: 0 });
+      setNotes('');
+      refresh();
+    } catch (e) { setError(e.message); }
+    finally { setSubmitting(false); }
+  };
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="How are you feeling?" onBack={onBack} />
+
+      {lastResult?.entry && (
+        <div style={toolStyles.banner(SEVERITY_COLOR[lastResult.entry.severity] || '#4A6741')}>
+          <span style={toolStyles.badge(SEVERITY_COLOR[lastResult.entry.severity] || '#4A6741')}>
+            {lastResult.entry.severity === 'red' ? 'We will reach out today' :
+             lastResult.entry.severity === 'amber' ? 'Worth talking through' : 'All clear'}
+          </span>
+          {lastResult.upsells?.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <p style={{ ...toolStyles.small, fontWeight: 600, color: '#2C2C2C', margin: '4px 0' }}>Things that may help:</p>
+              {lastResult.upsells.map(u => (
+                <div key={u.sku} style={toolStyles.row}>
+                  <span style={toolStyles.small}>• {u.label}</span>
+                  <button style={toolStyles.btnSubtle} onClick={() => alert(`Adding ${u.label} — coming soon`)}>Add</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!loggedToday && (
+        <div style={toolStyles.card}>
+          <p style={{ ...toolStyles.small, marginBottom: 14 }}>Takes 30 seconds. Helps us tune your plan and flag anything that needs a call back.</p>
+          {SYMPTOM_FIELDS.map(f => (
+            <div key={f.key} style={{ marginBottom: 14 }}>
+              <p style={{ ...toolStyles.label, color: '#2C2C2C', marginBottom: 6 }}>{f.label}</p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {SYMPTOM_LEVELS.map((lvl, i) => (
+                  <button key={i}
+                          onClick={() => setScores(s => ({ ...s, [f.key]: i }))}
+                          style={{
+                            flex: 1, padding: '8px 4px', borderRadius: 8, fontSize: 11,
+                            border: '1px solid ' + (scores[f.key] === i ? '#4A6741' : '#E8E5DF'),
+                            background: scores[f.key] === i ? '#4A6741' : '#fff',
+                            color: scores[f.key] === i ? '#fff' : '#6B6B6B',
+                            cursor: 'pointer',
+                          }}>{lvl}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <p style={{ ...toolStyles.label, color: '#2C2C2C' }}>Anything else? (optional)</p>
+          <textarea style={{ ...toolStyles.input, minHeight: 60, fontFamily: 'inherit', resize: 'vertical' }}
+                    value={notes} onChange={e => setNotes(e.target.value)}
+                    placeholder="e.g. mild dizziness when I stand up" maxLength={500} />
+          {error && <p style={toolStyles.errorText}>{error}</p>}
+          <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={submit} disabled={submitting}>
+            {submitting ? 'Sending…' : 'Submit check-in'}
+          </button>
+        </div>
+      )}
+
+      {loggedToday && (
+        <div style={toolStyles.card}>
+          <p style={{ ...toolStyles.small }}>✓ You've already checked in today. Come back tomorrow!</p>
+        </div>
+      )}
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>Past 14 days</h3>
+      {entries.length === 0 && <p style={toolStyles.empty}>No check-ins yet.</p>}
+      {entries.slice(0, 14).map(e => (
+        <div key={e.id} style={{ ...toolStyles.card, padding: '10px 14px' }}>
+          <div style={toolStyles.row}>
+            <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+            <span style={toolStyles.badge(SEVERITY_COLOR[e.severity] || '#4A6741')}>{e.severity}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Progress photos + share card ───────────────────────────────────────────
+function ProgressPhotosScreen({ onBack }) {
+  const [photos, setPhotos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [angle, setAngle] = useState('front');
+  const [showCompare, setShowCompare] = useState(false);
+  const fileRef = useRef(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.photos.list(true);
+      setPhotos(d.photos || []);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const upload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    compressImageForVision(file, 1024, 0.82).then(async ({ base64, mimeType }) => {
+      try {
+        await healthApi.photos.post({ angle, image: base64, mimeType });
+        refresh();
+      } catch (err) { setError(err.message); }
+    }).catch(() => setError('Could not read that image.'));
+  };
+
+  const byAngle = (a) => photos.filter(p => p.angle === a).sort((a, b) => new Date(b.takenAt) - new Date(a.takenAt));
+  const latestPer = ['front', 'side', 'back'].map(a => ({ angle: a, photo: byAngle(a)[0] }));
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Progress photos" onBack={onBack} />
+
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {latestPer.map(({ angle: a, photo }) => (
+          <div key={a} style={{ ...toolStyles.card, padding: 6, textAlign: 'center', margin: 0 }}>
+            <p style={{ ...toolStyles.label, marginBottom: 4 }}>{a}</p>
+            {photo ? (
+              <img src={`data:${photo.mimeType};base64,${photo.image}`} alt={a}
+                   style={{ width: '100%', borderRadius: 8, aspectRatio: '3/4', objectFit: 'cover' }} />
+            ) : (
+              <div style={{ aspectRatio: '3/4', background: '#F0EDE7', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, color: '#C0BBB2' }}>+</div>
+            )}
+            {photo && <p style={{ ...toolStyles.small, fontSize: 10, marginTop: 4 }}>{new Date(photo.takenAt).toLocaleDateString()}</p>}
+          </div>
+        ))}
+      </div>
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>Angle for next photo</p>
+        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+          {['front', 'side', 'back'].map(a => (
+            <button key={a} onClick={() => setAngle(a)} style={{
+              flex: 1, padding: '8px', borderRadius: 8, fontSize: 12,
+              border: '1px solid ' + (angle === a ? '#4A6741' : '#E8E5DF'),
+              background: angle === a ? '#4A6741' : '#fff',
+              color: angle === a ? '#fff' : '#6B6B6B', cursor: 'pointer', textTransform: 'capitalize',
+            }}>{a}</button>
+          ))}
+        </div>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={upload} style={{ display: 'none' }} />
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={() => fileRef.current?.click()}>
+          📷 Take {angle} photo
+        </button>
+      </div>
+
+      {photos.length >= 2 && (
+        <button style={toolStyles.btnSecondary} onClick={() => setShowCompare(true)}>
+          Side-by-side compare
+        </button>
+      )}
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>All photos</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && photos.length === 0 && <p style={toolStyles.empty}>No photos yet — your first one will become your “before.”</p>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+        {photos.map(p => (
+          <div key={p.id} style={{ position: 'relative' }}>
+            <img src={`data:${p.mimeType};base64,${p.image}`} alt=""
+                 style={{ width: '100%', borderRadius: 6, aspectRatio: '3/4', objectFit: 'cover' }} />
+            <span style={{ position: 'absolute', bottom: 4, left: 4, background: 'rgba(0,0,0,0.5)', color: '#fff', fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>
+              {p.angle} • {new Date(p.takenAt).toLocaleDateString()}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {showCompare && <CompareModal photos={photos} onClose={() => setShowCompare(false)} />}
+    </div>
+  );
+}
+
+function CompareModal({ photos, onClose }) {
+  const sorted = [...photos].sort((a, b) => new Date(a.takenAt) - new Date(b.takenAt));
+  const [leftId, setLeftId] = useState(sorted[0]?.id);
+  const [rightId, setRightId] = useState(sorted[sorted.length - 1]?.id);
+  const left = sorted.find(p => p.id === leftId);
+  const right = sorted.find(p => p.id === rightId);
+
+  const share = async () => {
+    if (!left || !right) return;
+    // Compose a 2-up canvas with both photos + dates as a simple share card.
+    const loadImg = (p) => new Promise((res) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => res(null);
+      i.src = `data:${p.mimeType};base64,${p.image}`;
+    });
+    const [a, b] = await Promise.all([loadImg(left), loadImg(right)]);
+    if (!a || !b) return;
+    const w = 600, h = 800;
+    const canvas = document.createElement('canvas');
+    canvas.width = w * 2 + 40;
+    canvas.height = h + 100;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#FAFAF7';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(a, 10, 50, w, h);
+    ctx.drawImage(b, w + 30, 50, w, h);
+    ctx.fillStyle = '#2C2C2C';
+    ctx.font = '600 28px sans-serif';
+    ctx.fillText('My HYDR801 Progress', 10, 36);
+    ctx.font = '20px sans-serif';
+    ctx.fillStyle = '#6B6B6B';
+    ctx.fillText(new Date(left.takenAt).toLocaleDateString(), 10, h + 80);
+    ctx.fillText(new Date(right.takenAt).toLocaleDateString(), w + 30, h + 80);
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+      const file = new File([blob], 'hydr801-progress.jpg', { type: 'image/jpeg' });
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: 'My progress' }); return; } catch {}
+      }
+      // Fallback: download
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'hydr801-progress.jpg';
+      link.click();
+      URL.revokeObjectURL(url);
+    }, 'image/jpeg', 0.88);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, padding: 16, overflowY: 'auto' }} onClick={onClose}>
+      <div style={{ background: '#fff', maxWidth: 480, margin: '20px auto', borderRadius: 16, padding: 18 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Compare</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <p style={toolStyles.label}>Before</p>
+            <select value={leftId} onChange={e => setLeftId(e.target.value)} style={{ ...toolStyles.input, padding: '8px' }}>
+              {sorted.map(p => <option key={p.id} value={p.id}>{p.angle} • {new Date(p.takenAt).toLocaleDateString()}</option>)}
+            </select>
+            {left && <img src={`data:${left.mimeType};base64,${left.image}`} alt="" style={{ width: '100%', marginTop: 8, borderRadius: 8 }} />}
+          </div>
+          <div>
+            <p style={toolStyles.label}>After</p>
+            <select value={rightId} onChange={e => setRightId(e.target.value)} style={{ ...toolStyles.input, padding: '8px' }}>
+              {sorted.map(p => <option key={p.id} value={p.id}>{p.angle} • {new Date(p.takenAt).toLocaleDateString()}</option>)}
+            </select>
+            {right && <img src={`data:${right.mimeType};base64,${right.image}`} alt="" style={{ width: '100%', marginTop: 8, borderRadius: 8 }} />}
+          </div>
+        </div>
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 16 }} onClick={share}>📤 Share progress</button>
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Labs ────────────────────────────────────────────────────────────────────
+const PANEL_LABEL = { CMP: 'Metabolic panel', CBC: 'Blood count', A1C: 'A1c', LIPID: 'Lipids', TSH: 'Thyroid', VITAMIN_D: 'Vitamin D', HORMONE: 'Hormones', MICRO_NUTRIENT: 'Micronutrients' };
+
+function LabsScreen({ onBack }) {
+  const [data, setData] = useState({ schedules: [], results: [], dueSoon: [], latestByPanel: {} });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await healthApi.labs.dashboard();
+        setData(d);
+        setError(null);
+      } catch (e) { setError(e.message); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="My labs" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {data.dueSoon?.length > 0 && (
+        <div style={toolStyles.banner('#C4956A')}>
+          <strong style={{ color: '#8B5E2F' }}>Due soon</strong>
+          {data.dueSoon.map(s => (
+            <p key={s.id} style={{ ...toolStyles.small, margin: '4px 0' }}>
+              {PANEL_LABEL[s.panel] || s.panel} — {s.nextDueDate ? new Date(s.nextDueDate).toLocaleDateString() : 'now'}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+
+      {!loading && data.schedules.length === 0 && data.results.length === 0 && (
+        <p style={toolStyles.empty}>No labs scheduled or on file yet. Your provider will add panels here after your next visit.</p>
+      )}
+
+      {data.schedules.map(s => {
+        const latest = data.latestByPanel[s.panel];
+        return (
+          <div key={s.id} style={toolStyles.card} onClick={() => latest && setSelected(latest)}>
+            <div style={toolStyles.row}>
+              <div>
+                <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{PANEL_LABEL[s.panel] || s.panel}</strong>
+                <p style={toolStyles.small}>Every {s.intervalDays} days</p>
+              </div>
+              {latest?.hasOutOfRange && <span style={toolStyles.badge('#C4956A')}>review</span>}
+              {latest && !latest.hasOutOfRange && <span style={toolStyles.badge('#4A6741')}>in range</span>}
+            </div>
+            {latest && <p style={{ ...toolStyles.small, marginTop: 6 }}>Last drawn {new Date(latest.drawnAt).toLocaleDateString()}</p>}
+          </div>
+        );
+      })}
+
+      {selected && <LabDetailModal result={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+function LabDetailModal({ result, onClose }) {
+  const [explainer, setExplainer] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const explain = async () => {
+    setLoading(true); setError(null);
+    try {
+      const d = await healthApi.labs.explain(result.id);
+      setExplainer(d);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, padding: 16, overflowY: 'auto' }} onClick={onClose}>
+      <div style={{ background: '#fff', maxWidth: 480, margin: '20px auto', borderRadius: 16, padding: 20 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 4 }}>{PANEL_LABEL[result.panel] || result.panel}</h2>
+        <p style={toolStyles.small}>Drawn {new Date(result.drawnAt).toLocaleDateString()}</p>
+
+        {explainer && (
+          <div style={toolStyles.banner(TONE_COLOR[explainer.tone] || '#4A6741')}>
+            <p style={{ margin: 0, fontSize: 14, color: '#2C2C2C' }}>{explainer.explanation}</p>
+            {explainer.actions?.length > 0 && (
+              <ul style={{ ...toolStyles.small, marginTop: 8, paddingLeft: 18 }}>
+                {explainer.actions.map((a, i) => <li key={i}>{a}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: 14 }}>
+          {result.markers.map((m, i) => (
+            <div key={i} style={{ ...toolStyles.row, padding: '8px 0', borderBottom: '1px solid #F0EDE7' }}>
+              <span style={{ fontSize: 13 }}>{m.name}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: m.flag === 'critical' ? '#C24A4A' : m.flag === 'high' || m.flag === 'low' ? '#C4956A' : '#4A6741' }}>
+                {m.value}{m.unit ? ' ' + m.unit : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+        {!explainer && (
+          <button style={{ ...toolStyles.btnPrimary, marginTop: 14 }} onClick={explain} disabled={loading}>
+            {loading ? 'Reading your results…' : '🤖 Explain in plain English'}
+          </button>
+        )}
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Meal coach ─────────────────────────────────────────────────────────────
+const UPSELL_COPY = {
+  'rd-consult': { label: 'Book a dietitian call', detail: '20 min 1:1 video — $49' },
+  'iv-hydration': { label: 'Book IV hydration', detail: 'B-complex + electrolytes in-clinic' },
+  'inbody-scan': { label: 'Schedule InBody scan', detail: 'See exactly what changed — muscle vs fat' },
+  'dose-review': { label: 'Schedule dose review', detail: 'NP visit to discuss titration' },
+};
+
+function MealCoachScreen({ onBack }) {
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async (force = false) => {
+    if (force) setRefreshing(true); else setLoading(true);
+    try {
+      const d = await healthApi.mealCoach.summary(force);
+      setSummary(d);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); setRefreshing(false); }
+  }, []);
+
+  useEffect(() => { load(false); }, [load]);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="AI meal coach" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {loading && <p style={toolStyles.small}>Reading your week…</p>}
+
+      {summary && (
+        <>
+          <div style={toolStyles.banner(TONE_COLOR[summary.tone] || '#4A6741')}>
+            <p style={toolStyles.label}>This week</p>
+            <p style={{ margin: '6px 0 0', fontSize: 15, color: '#2C2C2C', lineHeight: 1.45 }}>{summary.summary}</p>
+          </div>
+
+          {summary.suggestions.map((s, i) => (
+            <div key={i} style={toolStyles.card}>
+              <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{s.headline}</strong>
+              <p style={{ ...toolStyles.small, marginTop: 6, lineHeight: 1.5 }}>{s.detail}</p>
+              {s.upsellSku && UPSELL_COPY[s.upsellSku] && (
+                <div style={{ marginTop: 10, padding: 10, background: '#F7F4EE', borderRadius: 8 }}>
+                  <p style={{ ...toolStyles.label, color: '#8B5E2F', margin: 0 }}>{UPSELL_COPY[s.upsellSku].detail}</p>
+                  <button style={{ ...toolStyles.btnPrimary, background: '#C4956A', marginTop: 8, padding: '8px 14px', fontSize: 13 }}
+                          onClick={() => alert(`Booking ${UPSELL_COPY[s.upsellSku].label} — coming soon`)}>
+                    {UPSELL_COPY[s.upsellSku].label} →
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button style={toolStyles.btnSecondary} onClick={() => load(true)} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : '↻ Refresh this week'}
+          </button>
+          {summary.cached && (
+            <p style={{ ...toolStyles.small, textAlign: 'center', marginTop: 8 }}>
+              Cached • {new Date(summary.generatedAt).toLocaleDateString()}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Hub card on Home ────────────────────────────────────────────────────────
+function HealthToolsSection({ onOpen }) {
+  const tools = [
+    { key: 'weight', label: 'Weight', icon: '⚖️' },
+    { key: 'symptoms', label: 'Symptoms', icon: '🌡️' },
+    { key: 'photos', label: 'Photos', icon: '📸' },
+    { key: 'labs', label: 'Labs', icon: '🧪' },
+    { key: 'coach', label: 'AI coach', icon: '🤖' },
+  ];
+  return (
+    <section style={{ padding: '0 20px', marginTop: 20 }}>
+      <h3 style={{ fontSize: 16, fontWeight: 600, color: '#2C2C2C', margin: '0 0 10px', fontFamily: 'Fraunces, serif' }}>
+        Track Your Progress
+      </h3>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8 }}>
+        {tools.map(t => (
+          <button key={t.key}
+                  onClick={() => onOpen(t.key)}
+                  style={{
+                    background: '#fff', border: '1px solid #E8E5DF', borderRadius: 12,
+                    padding: '12px 6px', cursor: 'pointer', textAlign: 'center',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+                  }}>
+            <div style={{ fontSize: 22 }}>{t.icon}</div>
+            <div style={{ fontSize: 10, color: '#6B6B6B', marginTop: 4, fontWeight: 500 }}>{t.label}</div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
