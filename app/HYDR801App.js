@@ -347,6 +347,19 @@ const healthApi = {
   mealCoach: {
     summary: (force = false) => healthApi._call('/api/meal-coach', { method: 'POST', body: JSON.stringify({ force }) }),
   },
+  workouts: {
+    list: () => healthApi._call('/api/patient-workouts'),
+    post: (entry) => healthApi._call('/api/patient-workouts', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-workouts?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    screenshotOcr: (image, mimeType = 'image/jpeg') =>
+      healthApi._call('/api/workout-screenshot-ocr', { method: 'POST', body: JSON.stringify({ image, mimeType }) }),
+  },
+  bodyScans: {
+    list: () => healthApi._call('/api/patient-body-scans'),
+    get: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`),
+    post: (entry) => healthApi._call('/api/patient-body-scans', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
 };
 
 // Default state for a brand-new patient (used when their saved state is empty).
@@ -1891,6 +1904,8 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   if (tool === 'photos')   return <ProgressPhotosScreen onBack={() => setTool(null)} />;
   if (tool === 'labs')     return <LabsScreen onBack={() => setTool(null)} />;
   if (tool === 'coach')    return <MealCoachScreen onBack={() => setTool(null)} />;
+  if (tool === 'workout')  return <WorkoutLogScreen onBack={() => setTool(null)} />;
+  if (tool === 'bodyscan') return <BodyScanScreen onBack={() => setTool(null)} />;
 
   return (
     <div style={styles.screenContent} className="fade-in">
@@ -19754,10 +19769,701 @@ function MealCoachScreen({ onBack }) {
   );
 }
 
+// ── Workouts ────────────────────────────────────────────────────────────────
+const WORKOUT_OPTIONS = [
+  { key: 'cardio',   label: 'Cardio',    icon: '🏃' },
+  { key: 'strength', label: 'Strength',  icon: '🏋️' },
+  { key: 'walk',     label: 'Walk',      icon: '🚶' },
+  { key: 'cycling',  label: 'Cycling',   icon: '🚴' },
+  { key: 'swimming', label: 'Swimming',  icon: '🏊' },
+  { key: 'yoga',     label: 'Yoga',      icon: '🧘' },
+  { key: 'other',    label: 'Other',     icon: '✨' },
+];
+const INTENSITY_LABEL = { light: 'Light', moderate: 'Moderate', vigorous: 'Vigorous' };
+const INTENSITY_COLOR = { light: '#9B9B9B', moderate: '#4A6741', vigorous: '#C24A4A' };
+
+function WorkoutLogScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [totals, setTotals] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showLog, setShowLog] = useState(null);          // null | { prefill }
+  const [showImport, setShowImport] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.workouts.list();
+      setEntries(d.entries || []);
+      setTotals(d.totals || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Workouts" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>This week</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginTop: 8 }}>
+          <WkStat n={totals?.sessions ?? 0} label="sessions" />
+          <WkStat n={totals?.activeDays ?? 0} label="active days" />
+          <WkStat n={totals?.minutes ?? 0} label="minutes" />
+          <WkStat n={totals?.calories ?? 0} label="cal" />
+        </div>
+      </div>
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowLog({})}>+ Log workout</button>
+      <button style={toolStyles.btnSecondary} onClick={() => setShowImport(true)}>
+        📲 Import from Apple Health / Strava
+      </button>
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && entries.length === 0 && (
+        <p style={toolStyles.empty}>No workouts logged yet. Tap “Log workout” to start.</p>
+      )}
+      {entries.map(e => {
+        const opt = WORKOUT_OPTIONS.find(o => o.key === e.type) || WORKOUT_OPTIONS[6];
+        return (
+          <div key={e.id} style={{ ...toolStyles.card, padding: '12px 14px' }}>
+            <div style={toolStyles.row}>
+              <div>
+                <strong style={{ color: '#2C2C2C', fontSize: 15 }}>{opt.icon} {opt.label}</strong>
+                <p style={{ ...toolStyles.small, margin: '2px 0 0' }}>
+                  {e.durationMin} min
+                  {e.caloriesBurned ? ` • ${e.caloriesBurned} cal` : ''}
+                  {e.distanceMi ? ` • ${e.distanceMi} mi` : ''}
+                  {e.avgHeartRate ? ` • ${e.avgHeartRate} bpm` : ''}
+                </p>
+              </div>
+              <span style={toolStyles.badge(INTENSITY_COLOR[e.intensity] || '#9B9B9B')}>
+                {INTENSITY_LABEL[e.intensity] || e.intensity}
+              </span>
+            </div>
+            <div style={{ ...toolStyles.row, marginTop: 6 }}>
+              <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+              {e.source !== 'manual' && (
+                <span style={{ ...toolStyles.small, fontSize: 10 }}>via {e.source}</span>
+              )}
+            </div>
+            {e.notes && <p style={{ ...toolStyles.small, marginTop: 6, fontStyle: 'italic' }}>“{e.notes}”</p>}
+          </div>
+        );
+      })}
+
+      {showLog && (
+        <WorkoutLogModal
+          prefill={showLog.prefill || null}
+          onClose={() => setShowLog(null)}
+          onSaved={() => { setShowLog(null); refresh(); }}
+        />
+      )}
+      {showImport && (
+        <WorkoutImportModal
+          onClose={() => setShowImport(false)}
+          onParsed={(parsed) => { setShowImport(false); setShowLog({ prefill: parsed }); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function WkStat({ n, label }) {
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 22, fontWeight: 600, color: '#2C2C2C', fontFamily: 'Fraunces, serif' }}>{n}</div>
+      <div style={{ fontSize: 10, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600 }}>{label}</div>
+    </div>
+  );
+}
+
+function WorkoutLogModal({ onClose, onSaved, prefill }) {
+  const [type, setType] = useState(prefill?.type || 'cardio');
+  const [durationMin, setDurationMin] = useState(prefill?.durationMin?.toString() || '30');
+  const [intensity, setIntensity] = useState(prefill?.intensity || 'moderate');
+  const [caloriesBurned, setCaloriesBurned] = useState(prefill?.caloriesBurned?.toString() || '');
+  const [distanceMi, setDistanceMi] = useState(prefill?.distanceMi?.toString() || '');
+  const [avgHeartRate, setAvgHeartRate] = useState(prefill?.avgHeartRate?.toString() || '');
+  const [recordedAt, setRecordedAt] = useState(prefill?.recordedAt || new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async () => {
+    const dur = parseInt(durationMin);
+    if (!Number.isFinite(dur) || dur < 1) { setError('Duration must be at least 1 minute.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await healthApi.workouts.post({
+        type, durationMin: dur, intensity,
+        caloriesBurned: caloriesBurned ? parseInt(caloriesBurned) : null,
+        distanceMi: distanceMi ? Number(distanceMi) : null,
+        avgHeartRate: avgHeartRate ? parseInt(avgHeartRate) : null,
+        notes: notes || null,
+        source: prefill ? 'screenshot-ocr' : 'manual',
+        recordedAt: new Date(`${recordedAt}T12:00:00`).toISOString(),
+      });
+      onSaved();
+    } catch (e) { setError(e.message); setSaving(false); }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Log workout</h2>
+
+        <p style={toolStyles.label}>Type</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginTop: 6 }}>
+          {WORKOUT_OPTIONS.map(o => (
+            <button key={o.key} onClick={() => setType(o.key)}
+                    style={{
+                      background: type === o.key ? '#4A6741' : '#fff',
+                      color: type === o.key ? '#fff' : '#2C2C2C',
+                      border: `1px solid ${type === o.key ? '#4A6741' : '#E8E5DF'}`,
+                      borderRadius: 8, padding: '8px 4px', fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                    }}>
+              <div style={{ fontSize: 18 }}>{o.icon}</div>
+              <div style={{ marginTop: 2 }}>{o.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Duration (minutes)</p>
+        <input style={toolStyles.input} type="number" inputMode="numeric" min="1" max="600"
+               value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Intensity</p>
+        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          {['light','moderate','vigorous'].map(i => (
+            <button key={i} onClick={() => setIntensity(i)}
+                    style={{
+                      flex: 1,
+                      background: intensity === i ? INTENSITY_COLOR[i] : '#fff',
+                      color: intensity === i ? '#fff' : '#2C2C2C',
+                      border: `1px solid ${intensity === i ? INTENSITY_COLOR[i] : '#E8E5DF'}`,
+                      borderRadius: 8, padding: '10px 6px', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                    }}>
+              {INTENSITY_LABEL[i]}
+            </button>
+          ))}
+        </div>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Calories <span style={{ textTransform: 'none', fontWeight: 400, color: '#9B9B9B' }}>(optional — auto-estimated)</span></p>
+        <input style={toolStyles.input} type="number" inputMode="numeric" placeholder="Auto"
+               value={caloriesBurned} onChange={(e) => setCaloriesBurned(e.target.value)} />
+
+        {(type === 'cardio' || type === 'walk' || type === 'cycling') && (
+          <>
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Distance (miles, optional)</p>
+            <input style={toolStyles.input} type="number" inputMode="decimal" step="0.01"
+                   value={distanceMi} onChange={(e) => setDistanceMi(e.target.value)} />
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Avg heart rate (bpm, optional)</p>
+            <input style={toolStyles.input} type="number" inputMode="numeric"
+                   value={avgHeartRate} onChange={(e) => setAvgHeartRate(e.target.value)} />
+          </>
+        )}
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Date</p>
+        <input style={toolStyles.input} type="date"
+               value={recordedAt} onChange={(e) => setRecordedAt(e.target.value)} />
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Notes</p>
+        <textarea style={{ ...toolStyles.input, minHeight: 60, resize: 'vertical', fontFamily: 'inherit' }}
+                  placeholder="How did it feel?"
+                  value={notes} onChange={(e) => setNotes(e.target.value)} />
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button style={{ ...toolStyles.btnSecondary, marginTop: 0, flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={{ ...toolStyles.btnPrimary, flex: 1 }} onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save workout'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkoutImportModal({ onClose, onParsed }) {
+  const [stage, setStage] = useState('idle'); // idle | scanning | error
+  const [error, setError] = useState(null);
+  const [warnings, setWarnings] = useState([]);
+  const fileRef = useRef(null);
+
+  const handle = async (file) => {
+    if (!file) return;
+    setStage('scanning'); setError(null); setWarnings([]);
+    try {
+      const base64 = await fileToBase64(file);
+      const mimeType = file.type || 'image/jpeg';
+      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
+      onParsed(parsed);
+    } catch (e) {
+      setError(e.message);
+      if (Array.isArray(e.warnings)) setWarnings(e.warnings);
+      setStage('error');
+    }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
+        <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+          On iPhone, open the Health or Fitness app → tap a workout → screenshot the summary, then pick it here.
+          We'll parse type, duration, calories, distance, and heart rate automatically.
+        </p>
+
+        <input ref={fileRef} type="file" accept="image/*"
+               style={{ display: 'none' }}
+               onChange={(e) => handle(e.target.files?.[0])} />
+        <button style={toolStyles.btnPrimary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
+          {stage === 'scanning' ? '🔍 Reading screenshot…' : '📷 Pick screenshot from gallery'}
+        </button>
+
+        {error && (
+          <div style={{ ...toolStyles.banner('#C24A4A'), marginTop: 14 }}>
+            <strong style={{ color: '#C24A4A' }}>{error}</strong>
+            {warnings.length > 0 && (
+              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                {warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Shared modal styles + file→base64 helper used by all the modals below.
+const modalBackdropStyle = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  zIndex: 1000, padding: 16,
+};
+const modalCardStyle = {
+  background: '#fff', borderRadius: 16, padding: 20,
+  width: '100%', maxWidth: 480, maxHeight: '90vh', overflowY: 'auto',
+};
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || '';
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Body scan (MediaPipe pose + segmentation, on-device) ────────────────────
+function BodyScanScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [deltas, setDeltas] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showCapture, setShowCapture] = useState(false);
+  const [selected, setSelected] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.bodyScans.list();
+      setEntries(d.entries || []);
+      setDeltas(d.deltas || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const latest = entries[0];
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Body scan" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={toolStyles.banner('#4A6741')}>
+        <strong style={{ color: '#2C4220' }}>📐 On-device body measurements</strong>
+        <p style={{ ...toolStyles.small, margin: '4px 0 0' }}>
+          Snap a front + side photo in fitted clothing. Measurements run on your phone — photos never leave the device.
+        </p>
+      </div>
+
+      {latest ? (
+        <BodyScanResultCard entry={latest} deltas={deltas} onView={() => setSelected(latest)} />
+      ) : (
+        <p style={toolStyles.empty}>No scans yet. Take your first one to lock in a baseline.</p>
+      )}
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowCapture(true)}>
+        {latest ? '+ New scan' : '📸 Start first scan'}
+      </button>
+
+      {entries.length > 1 && (
+        <>
+          <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>Scan history</h3>
+          {entries.slice(1).map(e => (
+            <button key={e.id}
+                    onClick={() => setSelected(e)}
+                    style={{ ...toolStyles.card, padding: '10px 14px', width: '100%', textAlign: 'left', cursor: 'pointer' }}>
+              <div style={toolStyles.row}>
+                <div>
+                  <strong style={{ color: '#2C2C2C' }}>{new Date(e.capturedAt).toLocaleDateString()}</strong>
+                  <p style={{ ...toolStyles.small, margin: '2px 0 0' }}>
+                    {e.measurements.waistIn != null && `Waist ${e.measurements.waistIn}"`}
+                    {e.bodyFatPctEstimate != null && ` • ${e.bodyFatPctEstimate}% bf`}
+                  </p>
+                </div>
+                <span style={{ ...toolStyles.small, color: '#4A6741' }}>view →</span>
+              </div>
+            </button>
+          ))}
+        </>
+      )}
+
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+
+      {showCapture && (
+        <BodyScanCaptureModal
+          onClose={() => setShowCapture(false)}
+          onSaved={() => { setShowCapture(false); refresh(); }}
+        />
+      )}
+      {selected && (
+        <BodyScanDetailModal entry={selected} onClose={() => setSelected(null)} />
+      )}
+    </div>
+  );
+}
+
+function BodyScanResultCard({ entry, deltas, onView }) {
+  const m = entry.measurements;
+  const measureRow = (label, key, unit = '"') => {
+    const v = m[key];
+    const d = deltas?.[key];
+    if (v == null) return null;
+    return (
+      <div key={key} style={toolStyles.row}>
+        <span style={{ fontSize: 13, color: '#6B6B6B' }}>{label}</span>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>
+          {v}{unit}
+          {d != null && d !== 0 && (
+            <span style={{ ...toolStyles.badge(d < 0 ? '#4A6741' : '#C4956A'), marginLeft: 6 }}>
+              {d > 0 ? '+' : ''}{d}
+            </span>
+          )}
+        </span>
+      </div>
+    );
+  };
+
+  return (
+    <div style={toolStyles.card}>
+      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+        {entry.silhouetteSvg && (
+          <div style={{ flexShrink: 0, width: 100 }}
+               dangerouslySetInnerHTML={{ __html: entry.silhouetteSvg.replace('width="200"', 'width="100"').replace('height="400"', 'height="200"') }} />
+        )}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <p style={toolStyles.label}>Latest scan • {new Date(entry.capturedAt).toLocaleDateString()}</p>
+          {measureRow('Chest', 'chestIn')}
+          {measureRow('Waist', 'waistIn')}
+          {measureRow('Hips', 'hipsIn')}
+          {measureRow('Thigh', 'thighIn')}
+          {entry.bodyFatPctEstimate != null && measureRow('Body fat', 'bodyFatPctEstimate', '%')}
+        </div>
+      </div>
+      <button style={{ ...toolStyles.btnSubtle, marginTop: 8 }} onClick={onView}>See all measurements →</button>
+    </div>
+  );
+}
+
+function BodyScanDetailModal({ entry, onClose }) {
+  const m = entry.measurements;
+  const rows = [
+    ['Shoulders', m.shouldersIn, '"'],
+    ['Chest',     m.chestIn,     '"'],
+    ['Waist',     m.waistIn,     '"'],
+    ['Hips',      m.hipsIn,      '"'],
+    ['Thigh',     m.thighIn,     '"'],
+    ['Arm',       m.armIn,       '"'],
+    ['Neck',      m.neckIn,      '"'],
+    ['Inseam',    m.inseamIn,    '"'],
+  ].filter(([, v]) => v != null);
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 4 }}>
+          Scan • {new Date(entry.capturedAt).toLocaleDateString()}
+        </h2>
+        <p style={{ ...toolStyles.small, marginBottom: 12 }}>
+          Height {entry.heightIn}"{entry.weightLbs ? ` • ${entry.weightLbs} lbs` : ''}
+          {entry.poseConfidence != null && ` • pose confidence ${Math.round(entry.poseConfidence * 100)}%`}
+        </p>
+
+        {entry.silhouetteSvg && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}
+               dangerouslySetInnerHTML={{ __html: entry.silhouetteSvg }} />
+        )}
+
+        {rows.map(([label, value, unit]) => (
+          <div key={label} style={{ ...toolStyles.row, padding: '8px 0', borderBottom: '1px solid #F0EDE7' }}>
+            <span style={{ fontSize: 14, color: '#6B6B6B' }}>{label}</span>
+            <span style={{ fontSize: 15, fontWeight: 600, color: '#2C2C2C' }}>{value}{unit}</span>
+          </div>
+        ))}
+
+        {entry.bodyFatPctEstimate != null && (
+          <div style={{ ...toolStyles.banner('#4A6741'), marginTop: 14 }}>
+            <strong style={{ color: '#2C4220' }}>Body fat (Navy method estimate)</strong>
+            <p style={{ ...toolStyles.small, margin: '4px 0 0' }}>
+              <span style={{ fontSize: 22, fontWeight: 600, color: '#2C2C2C' }}>{entry.bodyFatPctEstimate}%</span>
+              {entry.leanMassLbsEstimate != null && ` • lean mass ≈ ${entry.leanMassLbsEstimate} lbs`}
+            </p>
+            <p style={{ ...toolStyles.small, margin: '6px 0 0', fontStyle: 'italic' }}>
+              Estimate based on neck / waist / hip and height. Not a clinical measurement.
+            </p>
+          </div>
+        )}
+
+        <p style={{ ...toolStyles.small, marginTop: 16, textAlign: 'center', color: '#9B9B9B' }}>
+          Photos stay on your device. Only measurements are saved.
+        </p>
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={onClose}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function BodyScanCaptureModal({ onClose, onSaved }) {
+  const [stage, setStage] = useState('intro'); // intro | front | side | processing | review | saving
+  const [heightFt, setHeightFt] = useState('5');
+  const [heightIn, setHeightIn] = useState('6');
+  const [weightLbs, setWeightLbs] = useState('');
+  const [sex, setSex] = useState('female');
+  const [frontFile, setFrontFile] = useState(null);
+  const [sideFile, setSideFile] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const frontRef = useRef(null);
+  const sideRef = useRef(null);
+
+  const heightInches = (parseInt(heightFt) || 0) * 12 + (parseInt(heightIn) || 0);
+
+  const handleFront = (file) => {
+    if (!file) return;
+    setFrontFile(file); setStage('side');
+  };
+  const handleSide = async (file) => {
+    if (!file) return;
+    setSideFile(file); setStage('processing'); setError(null);
+    try {
+      const { runBodyScan } = await import('./bodyScan');
+      const r = await runBodyScan({
+        frontFile, sideFile: file, heightIn: heightInches,
+        weightLbs: weightLbs ? Number(weightLbs) : null, sex,
+      });
+      setResult(r); setStage('review');
+    } catch (e) {
+      setError(e.message); setStage('front');
+    }
+  };
+
+  const save = async () => {
+    setStage('saving'); setError(null);
+    try {
+      await healthApi.bodyScans.post({
+        heightIn: heightInches,
+        weightLbs: weightLbs ? Number(weightLbs) : null,
+        measurements: result.measurements,
+        bodyFatPctEstimate: result.bodyFatPctEstimate,
+        leanMassLbsEstimate: result.leanMassLbsEstimate,
+        silhouetteSvg: result.silhouetteSvg,
+        thumbnailFront: result.thumbnailFront,
+        thumbnailSide: result.thumbnailSide,
+        poseConfidence: result.poseConfidence,
+        capturedAt: new Date().toISOString(),
+      });
+      onSaved();
+    } catch (e) {
+      setError(e.message); setStage('review');
+    }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={stage === 'processing' || stage === 'saving' ? null : onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>
+          {stage === 'intro' && 'Set up scan'}
+          {stage === 'front' && '1 of 2 — Front photo'}
+          {stage === 'side' && '2 of 2 — Side photo'}
+          {stage === 'processing' && 'Processing scan…'}
+          {stage === 'review' && 'Review measurements'}
+          {stage === 'saving' && 'Saving…'}
+        </h2>
+
+        {stage === 'intro' && (
+          <>
+            <p style={toolStyles.label}>Your height</p>
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <input style={toolStyles.input} type="number" placeholder="ft" min="3" max="8"
+                     value={heightFt} onChange={(e) => setHeightFt(e.target.value)} />
+              <input style={toolStyles.input} type="number" placeholder="in" min="0" max="11"
+                     value={heightIn} onChange={(e) => setHeightIn(e.target.value)} />
+            </div>
+
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Current weight (lbs, optional — improves body fat estimate)</p>
+            <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1"
+                   value={weightLbs} onChange={(e) => setWeightLbs(e.target.value)} />
+
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Sex (Navy body-fat formula)</p>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              {['female','male'].map(s => (
+                <button key={s} onClick={() => setSex(s)}
+                        style={{
+                          flex: 1,
+                          background: sex === s ? '#4A6741' : '#fff',
+                          color: sex === s ? '#fff' : '#2C2C2C',
+                          border: `1px solid ${sex === s ? '#4A6741' : '#E8E5DF'}`,
+                          borderRadius: 8, padding: '10px 6px', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                        }}>
+                  {s === 'female' ? 'Female' : 'Male'}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ ...toolStyles.banner('#C4956A'), marginTop: 14 }}>
+              <strong style={{ color: '#8B5E2F' }}>For best results:</strong>
+              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                <li>Wear fitted clothing (or just underwear)</li>
+                <li>Plain background, even lighting</li>
+                <li>Phone at hip height, ~6 ft away</li>
+                <li>Arms slightly out from body, feet shoulder-width apart</li>
+              </ul>
+            </div>
+
+            <button style={{ ...toolStyles.btnPrimary, marginTop: 14 }}
+                    onClick={() => setStage('front')}
+                    disabled={!heightInches || heightInches < 36}>
+              Start scan
+            </button>
+            <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+          </>
+        )}
+
+        {stage === 'front' && (
+          <>
+            <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+              Face the camera. Stand straight, arms slightly out from your body, feet shoulder-width apart.
+            </p>
+            <input ref={frontRef} type="file" accept="image/*" capture="environment"
+                   style={{ display: 'none' }}
+                   onChange={(e) => handleFront(e.target.files?.[0])} />
+            <button style={toolStyles.btnPrimary} onClick={() => frontRef.current?.click()}>📸 Take front photo</button>
+            {error && <p style={toolStyles.errorText}>{error}</p>}
+            <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+          </>
+        )}
+
+        {stage === 'side' && (
+          <>
+            <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+              Turn 90° to your side. Same spot, arms slightly forward of your body.
+            </p>
+            <input ref={sideRef} type="file" accept="image/*" capture="environment"
+                   style={{ display: 'none' }}
+                   onChange={(e) => handleSide(e.target.files?.[0])} />
+            <button style={toolStyles.btnPrimary} onClick={() => sideRef.current?.click()}>📸 Take side photo</button>
+            <button style={{ ...toolStyles.btnSubtle, marginTop: 8 }} onClick={() => { setFrontFile(null); setStage('front'); }}>
+              ← Retake front photo
+            </button>
+          </>
+        )}
+
+        {stage === 'processing' && (
+          <div style={{ padding: '40px 0', textAlign: 'center' }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>📐</div>
+            <p style={{ ...toolStyles.small, marginBottom: 4 }}>Loading pose model (first run downloads ~12 MB)…</p>
+            <p style={{ ...toolStyles.small }}>Running on-device measurements…</p>
+          </div>
+        )}
+
+        {stage === 'review' && result && (
+          <>
+            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: 14 }}>
+              {result.silhouetteSvg && (
+                <div style={{ flexShrink: 0, width: 100 }}
+                     dangerouslySetInnerHTML={{ __html: result.silhouetteSvg.replace('width="200"', 'width="100"').replace('height="400"', 'height="200"') }} />
+              )}
+              <div style={{ flex: 1 }}>
+                {[
+                  ['Shoulders', result.measurements.shouldersIn],
+                  ['Chest', result.measurements.chestIn],
+                  ['Waist', result.measurements.waistIn],
+                  ['Hips', result.measurements.hipsIn],
+                  ['Thigh', result.measurements.thighIn],
+                  ['Inseam', result.measurements.inseamIn],
+                ].filter(([, v]) => v != null).map(([l, v]) => (
+                  <div key={l} style={toolStyles.row}>
+                    <span style={{ fontSize: 13, color: '#6B6B6B' }}>{l}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>{v}"</span>
+                  </div>
+                ))}
+                {result.bodyFatPctEstimate != null && (
+                  <div style={{ ...toolStyles.row, marginTop: 8, paddingTop: 8, borderTop: '1px solid #F0EDE7' }}>
+                    <span style={{ fontSize: 13, color: '#6B6B6B' }}>Body fat (est.)</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>{result.bodyFatPctEstimate}%</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <p style={{ ...toolStyles.small, color: '#9B9B9B', fontStyle: 'italic', marginBottom: 12 }}>
+              Pose confidence {Math.round(result.poseConfidence * 100)}%. Measurements within ~½ inch tend to require a good plain background.
+            </p>
+
+            {error && <p style={toolStyles.errorText}>{error}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...toolStyles.btnSecondary, marginTop: 0, flex: 1 }} onClick={() => { setResult(null); setFrontFile(null); setSideFile(null); setStage('front'); }}>
+                Redo scan
+              </button>
+              <button style={{ ...toolStyles.btnPrimary, flex: 1 }} onClick={save}>Save scan</button>
+            </div>
+          </>
+        )}
+
+        {stage === 'saving' && (
+          <div style={{ padding: '40px 0', textAlign: 'center' }}>
+            <p style={toolStyles.small}>Saving your measurements…</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Hub card on Home ────────────────────────────────────────────────────────
 function HealthToolsSection({ onOpen }) {
   const tools = [
     { key: 'weight', label: 'Weight', icon: '⚖️' },
+    { key: 'bodyscan', label: 'Body scan', icon: '📐' },
+    { key: 'workout', label: 'Workouts', icon: '💪' },
     { key: 'symptoms', label: 'Symptoms', icon: '🌡️' },
     { key: 'photos', label: 'Photos', icon: '📸' },
     { key: 'labs', label: 'Labs', icon: '🧪' },
@@ -19768,7 +20474,7 @@ function HealthToolsSection({ onOpen }) {
       <h3 style={{ fontSize: 16, fontWeight: 600, color: '#2C2C2C', margin: '0 0 10px', fontFamily: 'Fraunces, serif' }}>
         Track Your Progress
       </h3>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
         {tools.map(t => (
           <button key={t.key}
                   onClick={() => onOpen(t.key)}
