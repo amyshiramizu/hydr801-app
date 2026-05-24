@@ -1208,7 +1208,7 @@ function ProviderDashboard({ patients, setCurrentScreen }) {
       {/* Alerts Section */}
       {alerts.length > 0 && (
         <section style={styles.section}>
-          <h3 style={styles.sectionTitle}>âš ️ Patient Alerts</h3>
+          <h3 style={styles.sectionTitle}>⚠️ Patient Alerts</h3>
           <div style={styles.alertsList}>
             {alerts.map((alert, idx) => (
               <div key={idx} style={styles.alertCard}>
@@ -1389,7 +1389,7 @@ function PatientListScreen({ patients, setCurrentScreen }) {
                   {compliance}%
                 </div>
                 {patient.alerts?.length > 0 && (
-                  <span style={styles.plcAlert}>âš ️</span>
+                  <span style={styles.plcAlert}>⚠️</span>
                 )}
               </div>
             </div>
@@ -1422,7 +1422,7 @@ function PatientDetailScreen({ patient, onBack }) {
         {patient.alerts?.length > 0 && (
           <div style={styles.pdAlerts}>
             {patient.alerts.map((alert, idx) => (
-              <div key={idx} style={styles.pdAlertItem}>âš ️ {alert}</div>
+              <div key={idx} style={styles.pdAlertItem}>⚠️ {alert}</div>
             ))}
           </div>
         )}
@@ -1800,7 +1800,7 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
     { id: 'patients', icon: '👥', label: 'Patients' },
     { id: 'messages', icon: '💬', label: 'Messages' },
     { id: 'analytics', icon: '📊', label: 'Analytics' },
-    { id: 'settings', icon: 'âš™️', label: 'Settings' },
+    { id: 'settings', icon: '⚙️', label: 'Settings' },
   ];
 
   return (
@@ -3114,7 +3114,7 @@ function MealPlanSetup({ user, onComplete, onCancel }) {
   ];
 
   const cookingTimeOptions = [
-    { id: 'minimal', name: 'Minimal (< 15 min)', icon: 'âš¡' },
+    { id: 'minimal', name: 'Minimal (< 15 min)', icon: '⚡' },
     { id: 'quick', name: 'Quick (15-30 min)', icon: '🕐' },
     { id: 'moderate', name: 'Moderate (30-45 min)', icon: '🕑' },
     { id: 'any', name: 'Any time is fine', icon: '👨‍🍳' },
@@ -3605,7 +3605,7 @@ Make meals delicious, varied, and realistic to prepare. Include a mix of simple 
         <div style={styles.mpSummaryBox}>
           <h4 style={styles.mpSummaryTitle}>Your Preferences Summary</h4>
           <p style={styles.mpSummaryItem}>🍽️ Diet: {dietTypes.find(d => d.id === preferences.dietType)?.name || 'Omnivore'}</p>
-          <p style={styles.mpSummaryItem}>âš ️ Allergies: {preferences.allergies.length > 0 ? preferences.allergies.join(', ') : 'None'}</p>
+          <p style={styles.mpSummaryItem}>⚠️ Allergies: {preferences.allergies.length > 0 ? preferences.allergies.join(', ') : 'None'}</p>
           <p style={styles.mpSummaryItem}>🌍 Cuisines: {preferences.cuisines.length > 0 ? preferences.cuisines.slice(0, 3).join(', ') : 'Any'}</p>
           <p style={styles.mpSummaryItem}>⏱️ Cooking: {cookingTimeOptions.find(c => c.id === preferences.cookingTime)?.name || 'Any'}</p>
         </div>
@@ -7323,7 +7323,7 @@ Only invent a new exercise name if nothing in the list fits. Prefer names from t
         </div>
 
         <div style={styles.safetySection}>
-          <h4 style={styles.safetyTitle}>âš ️ Safety Notes</h4>
+          <h4 style={styles.safetyTitle}>⚠️ Safety Notes</h4>
           {finalResults.safetyRecommendations.map((s, i) => (
             <p key={i} style={styles.safetyItem}>• {s}</p>
           ))}
@@ -7803,7 +7803,7 @@ function TreatmentsScreen({ setActiveModal }) {
   const [activeCategory, setActiveCategory] = useState('weight-loss');
 
   const categories = [
-    { id: 'weight-loss', name: 'Weight Loss', icon: 'âš–️' },
+    { id: 'weight-loss', name: 'Weight Loss', icon: '⚖️' },
     { id: 'iv-therapy', name: 'IV Therapy', icon: '💧' },
     { id: 'vitamin-boosters', name: 'Boosters', icon: '💉' },
     { id: 'hormone', name: 'Hormone', icon: '🧬' },
