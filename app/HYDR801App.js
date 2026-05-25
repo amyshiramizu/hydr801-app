@@ -10776,7 +10776,7 @@ async function compressImageForVision(file, maxEdge = 1280, quality = 0.85) {
   };
 }
 
-// Snap-a-meal flow: capture a photo, send to Claude vision, let the patient
+// Snap-a-meal flow: capture a photo, send to AI vision (Gemma), let the patient
 // confirm/edit the parsed items, then write them to the food log.
 function PhotoFoodModal({ onClose, onConfirm }) {
   const [stage, setStage] = useState('capture'); // capture | analyzing | review | error
@@ -10784,12 +10784,25 @@ function PhotoFoodModal({ onClose, onConfirm }) {
   const [base64, setBase64] = useState(null);
   const [mimeType, setMimeType] = useState('image/jpeg');
   const [note, setNote] = useState('');
-  const [error, setError] = useState(null);
+  const [error, setErrorRaw] = useState(null);
   const [items, setItems] = useState([]);
   const [mealGuess, setMealGuess] = useState('Snacks');
   const [summary, setSummary] = useState('');
   const [warnings, setWarnings] = useState([]);
   const fileInputRef = useRef(null);
+
+  // Defensive scrub: any upstream error message that mentions Anthropic or
+  // Claude (eg. when a stale deploy is still serving the old backend) gets
+  // rebranded to Gemma before the patient sees it.
+  const setError = (msg) => {
+    if (!msg) return setErrorRaw(msg);
+    const cleaned = String(msg)
+      .replace(/\bAnthropic API\b/gi, 'Gemma API')
+      .replace(/\bAnthropic\b/gi, 'Gemma')
+      .replace(/\bClaude API\b/gi, 'Gemma API')
+      .replace(/\bClaude\b/gi, 'Gemma');
+    setErrorRaw(cleaned);
+  };
 
   const pickFile = (e) => {
     const file = e.target.files?.[0];
