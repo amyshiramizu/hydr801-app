@@ -10622,6 +10622,7 @@ function PhotoFoodModal({ onClose, onConfirm }) {
   const [summary, setSummary] = useState('');
   const [warnings, setWarnings] = useState([]);
   const fileInputRef = useRef(null);
+  const libraryInputRef = useRef(null);
 
   // Defensive scrub: any upstream error message that mentions Anthropic or
   // Claude (eg. when a stale deploy is still serving the old backend) gets
@@ -10747,11 +10748,21 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                     onChange={pickFile}
                     style={{display:'none'}}
                   />
+                  <input
+                    ref={libraryInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={pickFile}
+                    style={{display:'none'}}
+                  />
                   <button
                     style={{...styles.primaryButton, marginBottom: 10}}
                     onClick={() => fileInputRef.current?.click()}
                   >📷 Take photo</button>
-                  <p style={{fontSize:11,color:'#9B9B9B'}}>You can also choose an existing photo.</p>
+                  <button
+                    style={{...styles.secondaryButton, marginBottom: 10}}
+                    onClick={() => libraryInputRef.current?.click()}
+                  >🖼️ Choose from library</button>
                 </div>
               ) : (
                 <>
