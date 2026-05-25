@@ -3154,91 +3154,30 @@ Daily Protein Target: ${proteinTarget}g minimum
     `.trim();
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/meal-plan-generator`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 4000,
-          messages: [{
-            role: 'user',
-            content: `You are a nutrition AI creating a personalized 7-day meal plan for a GLP-1 weight loss patient. This person is on medication like Ozempic, Wegovy, or Mounjaro.
-
-Patient Info & Dietary Preferences:
-${prefsDescription}
-
-CRITICAL GLP-1 NUTRITION REQUIREMENTS:
-1. HIGH PROTEIN: ${Math.round(proteinTarget / preferences.mealsPerDay)}g+ protein per meal minimum (${proteinTarget}g daily - crucial for muscle preservation during weight loss)
-2. CALORIE TARGET: ${calorieTarget} calories daily (calculated from patient's current weight of ${currentWeight} lbs at 10.5 cal/lb)
-3. MODERATE FIBER: 25-30g daily total (helps with satiety but too much can cause GI issues with GLP-1)
-4. SMALLER PORTIONS: GLP-1 reduces appetite, so portions should be satisfying but not overwhelming
-5. HYDRATION FOCUS: Include water-rich foods; GLP-1 can reduce thirst sensation
-6. AVOID: Greasy/fried foods, very high-fat meals, excessive sugar (can cause dumping syndrome)
-7. PROTEIN FIRST: Structure meals to eat protein first, then vegetables, then carbs
-
-Create a JSON response with this structure (respond ONLY with JSON, no markdown):
-{
-  "weeklyPlan": [
-    {
-      "day": "Monday",
-      "meals": [
-        {
-          "type": "breakfast",
-          "name": "Meal Name",
-          "description": "Brief appetizing description",
-          "calories": 350,
-          "protein": 30,
-          "carbs": 25,
-          "fat": 12,
-          "fiber": 6,
-          "ingredients": ["ingredient 1 with amount", "ingredient 2 with amount"],
-          "instructions": "Brief prep instructions (2-3 sentences)",
-          "glp1Tip": "Specific tip for eating this meal on GLP-1",
-          "prepTime": "15 min"
-        }
-      ],
-      "snacks": [
-        {
-          "name": "Snack name",
-          "emoji": "🍎",
-          "calories": 150,
-          "protein": 10,
-          "description": "Brief description"
-        }
-      ],
-      "dailyTotals": {
-        "calories": ${calorieTarget},
-        "protein": ${proteinTarget},
-        "fiber": 28
-      }
-    }
-  ],
-  "hydrationTip": "Personalized hydration advice for this person",
-  "weeklyTips": ["tip 1 for success", "tip 2", "tip 3"],
-  "groceryCategories": {
-    "proteins": ["item1", "item2"],
-    "produce": ["item1", "item2"],
-    "dairy": ["item1", "item2"],
-    "pantry": ["item1", "item2"]
-  }
-}
-
-Make meals delicious, varied, and realistic to prepare. Include a mix of simple and slightly more elaborate options. Each day should have ${preferences.mealsPerDay} meals and ${preferences.snacksPerDay} snack options. Target ${minCalories}-${maxCalories} calories daily with at least ${proteinTarget}g protein. Distribute calories appropriately across meals.`
-          }]
-        })
+          preferences: {
+            dietType: preferences.dietType,
+            allergies: preferences.allergies,
+            dislikes: preferences.dislikes,
+            cuisines: preferences.cuisines,
+            cookingTime: preferences.cookingTime,
+            mealsPerDay: preferences.mealsPerDay,
+            snacksPerDay: preferences.snacksPerDay,
+          },
+          currentWeight,
+        }),
       });
 
-      const data = await response.json();
-      const planText = data.content.map(c => c.text || '').join('');
-      
-      let mealPlan;
-      try {
-        const cleanJson = planText.replace(/```json|```/g, '').trim();
-        mealPlan = JSON.parse(cleanJson);
-      } catch {
-        mealPlan = getDefaultMealPlan(preferences, calorieTarget, proteinTarget);
-      }
-
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const mealPlan = await response.json();
+      if (!mealPlan?.weeklyPlan?.length) throw new Error('empty plan');
       onComplete(preferences, mealPlan);
 
     } catch (error) {
@@ -6672,67 +6611,21 @@ function AIFitnessAssessment({ onComplete, onCancel }) {
     const selectedFrames = frameIndices.map(i => capturedFrames[Math.min(i, capturedFrames.length - 1)]);
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/exercise-form-analysis`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              ...selectedFrames.map((frame, idx) => ({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/jpeg',
-                  data: frame.split(',')[1]
-                }
-              })),
-              {
-                type: 'text',
-                text: `You are a fitness assessment AI for a GLP-1 wellness app. Analyze these ${selectedFrames.length} images of a person performing a "${exercise.name}" exercise.
-
-The person was instructed to: "${exercise.instruction}"
-
-Please analyze their form and provide a JSON response with the following structure (respond ONLY with JSON, no markdown):
-{
-  "exerciseDetected": true/false,
-  "formScore": 1-10,
-  "observations": ["observation 1", "observation 2"],
-  "strengths": ["strength 1", "strength 2"],
-  "improvements": ["improvement 1", "improvement 2"],
-  "mobilityLevel": "limited" | "moderate" | "good" | "excellent",
-  "safetyNotes": ["any safety concerns"]
-}
-
-Be encouraging but honest. Consider that this person is on a GLP-1 medication for weight management and may be new to exercise. Focus on what they did well while noting areas for improvement.`
-              }
-            ]
-          }]
-        })
+          exercise: { id: exercise.id, name: exercise.name, instruction: exercise.instruction },
+          frames: selectedFrames.map(f => f.split(',')[1]).filter(Boolean),
+        }),
       });
 
-      const data = await response.json();
-      const analysisText = data.content.map(c => c.text || '').join('');
-      
-      // Parse JSON from response
-      let analysis;
-      try {
-        const cleanJson = analysisText.replace(/```json|```/g, '').trim();
-        analysis = JSON.parse(cleanJson);
-      } catch {
-        // Default analysis if parsing fails
-        analysis = {
-          exerciseDetected: true,
-          formScore: 7,
-          observations: ['Movement detected and analyzed'],
-          strengths: ['Good effort and willingness to assess'],
-          improvements: ['Continue practicing for better form'],
-          mobilityLevel: 'moderate',
-          safetyNotes: []
-        };
-      }
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const analysis = await response.json();
 
       setAnalysisResults(prev => [...prev, { exercise: exercise.id, ...analysis }]);
       setIsAnalyzing(false);
@@ -6783,84 +6676,23 @@ Be encouraging but honest. Consider that this person is on a GLP-1 medication fo
       : 'No equipment (bodyweight only)';
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/workout-plan-generator`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: `You are a fitness coach AI creating a personalized workout plan for a GLP-1 patient. Based on these fitness assessment results and available equipment, create a comprehensive but gentle workout plan.
-
-Assessment Results:
-${JSON.stringify(allResults, null, 2)}
-
-Available Equipment: ${equipmentList}
-
-Create a JSON response with this structure (respond ONLY with JSON, no markdown):
-{
-  "overallLevel": "beginner" | "intermediate" | "advanced",
-  "overallScore": 1-100,
-  "summary": "2-3 sentence summary of their fitness level",
-  "strengths": ["key strength 1", "key strength 2", "key strength 3"],
-  "focusAreas": ["area to improve 1", "area to improve 2"],
-  "equipmentUsed": ["list of equipment incorporated into the plan"],
-  "weeklyPlan": {
-    "daysPerWeek": 3-5,
-    "minutesPerSession": 15-45,
-    "workouts": [
-      {
-        "day": "Monday",
-        "name": "Workout Name",
-        "type": "strength" | "cardio" | "flexibility" | "balance",
-        "duration": "XX min",
-        "exercises": [
-          {"name": "Exercise", "sets": "X", "reps": "X", "equipment": "equipment needed or bodyweight", "notes": "any modifications"}
-        ]
-      }
-    ]
-  },
-  "safetyRecommendations": ["recommendation 1", "recommendation 2"],
-  "progressionTips": ["tip for advancing over time"],
-  "equipmentToBuy": ["optional equipment that would enhance their workouts"]
-}
-
-Important considerations:
-- This person is on GLP-1 medication for weight management
-- Focus on muscle preservation (very important during weight loss)
-- ONLY use exercises that match their available equipment: ${equipmentList}
-- Include low-impact options
-- Emphasize consistency over intensity
-- Make it achievable and encouraging
-- If they have limited equipment, be creative with bodyweight variations
-
-CRITICAL — EXERCISE NAMING:
-The app shows a demo video for each exercise. Videos are matched by exact name, so you MUST choose names from the supported list below whenever possible. Use the exact spelling shown.
-
-Supported exercise names (pick from these):
-- Beginner / low-impact: Wall Push-ups, Chair Squats, Standing Marches, Arm Circles, Seated Leg Lifts, Wall Slides, Calf Raises, Walking, Single Leg Stands
-- Bodyweight strength: Push-ups, Squats, Bodyweight Squats, Lunges, Plank, Glute Bridges, Bird Dogs, Mountain Climbers, Jumping Jacks, Burpees, Standing Rows
-- Dumbbell: Dumbbell Rows, Bent Over Rows, Dumbbell Press, Shoulder Press, Bicep Curls, Tricep Extensions, Goblet Squats, Deadlifts, Romanian Deadlifts, Lateral Raises
-- Resistance band: Band Pull Aparts, Banded Rows, Band Squats
-- Core: Crunches, Russian Twists, Leg Raises, Dead Bugs, Side Planks
-- Stretching / mobility: Cat-Cow, Gentle Stretching, Hip Flexor Stretch, Hamstring Stretch, Quad Stretch, Shoulder Stretch, Child's Pose
-
-Only invent a new exercise name if nothing in the list fits. Prefer names from the list.`
-          }]
-        })
+          assessmentResults: allResults,
+          equipment,
+          equipmentList,
+        }),
       });
 
-      const data = await response.json();
-      const planText = data.content.map(c => c.text || '').join('');
-      
-      let plan;
-      try {
-        const cleanJson = planText.replace(/```json|```/g, '').trim();
-        plan = JSON.parse(cleanJson);
-      } catch {
-        plan = getDefaultPlan();
-      }
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const plan = await response.json();
+      if (!plan?.weeklyPlan) throw new Error('empty plan');
 
       setFinalResults(plan);
       setStage('results');
