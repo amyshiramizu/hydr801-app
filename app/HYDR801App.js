@@ -310,6 +310,58 @@ const authApi = {
   },
 };
 
+// Patient-side calls for the five new health-tools endpoints. Every call
+// attaches the patient_app_sessions Bearer token automatically and resolves
+// to JSON (throwing on non-2xx with the server's error message).
+const healthApi = {
+  _call: async (path, opts = {}) => {
+    const token = authApi.loadToken();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(`${PROVIDER_API_BASE}${path}`, { ...opts, headers });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `${r.status} ${r.statusText}`);
+    return data;
+  },
+  weights: {
+    list: () => healthApi._call('/api/patient-weights'),
+    post: (entry) => healthApi._call('/api/patient-weights', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-weights?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    scaleOcr: (image, mimeType = 'image/jpeg') =>
+      healthApi._call('/api/scale-ocr', { method: 'POST', body: JSON.stringify({ image, mimeType }) }),
+  },
+  symptoms: {
+    list: () => healthApi._call('/api/patient-symptoms'),
+    post: (entry) => healthApi._call('/api/patient-symptoms', { method: 'POST', body: JSON.stringify(entry) }),
+  },
+  photos: {
+    list: (includeImage = false) => healthApi._call(`/api/patient-progress-photos${includeImage ? '?include_image=1' : ''}`),
+    get: (id) => healthApi._call(`/api/patient-progress-photos?id=${encodeURIComponent(id)}`),
+    post: (entry) => healthApi._call('/api/patient-progress-photos', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-progress-photos?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
+  labs: {
+    dashboard: () => healthApi._call('/api/patient-labs'),
+    explain: (resultId) => healthApi._call('/api/lab-explainer', { method: 'POST', body: JSON.stringify({ resultId }) }),
+  },
+  mealCoach: {
+    summary: (force = false) => healthApi._call('/api/meal-coach', { method: 'POST', body: JSON.stringify({ force }) }),
+  },
+  workouts: {
+    list: () => healthApi._call('/api/patient-workouts'),
+    post: (entry) => healthApi._call('/api/patient-workouts', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-workouts?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    screenshotOcr: (image, mimeType = 'image/jpeg') =>
+      healthApi._call('/api/workout-screenshot-ocr', { method: 'POST', body: JSON.stringify({ image, mimeType }) }),
+  },
+  bodyScans: {
+    list: () => healthApi._call('/api/patient-body-scans'),
+    get: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`),
+    post: (entry) => healthApi._call('/api/patient-body-scans', { method: 'POST', body: JSON.stringify(entry) }),
+    delete: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
+};
+
 // Default state for a brand-new patient (used when their saved state is empty).
 // Mirrors the mock state HYDR801App used to start with.
 function defaultPatientState(profile) {
@@ -1156,7 +1208,7 @@ function ProviderDashboard({ patients, setCurrentScreen }) {
       {/* Alerts Section */}
       {alerts.length > 0 && (
         <section style={styles.section}>
-          <h3 style={styles.sectionTitle}>âš ️ Patient Alerts</h3>
+          <h3 style={styles.sectionTitle}>⚠️ Patient Alerts</h3>
           <div style={styles.alertsList}>
             {alerts.map((alert, idx) => (
               <div key={idx} style={styles.alertCard}>
@@ -1337,7 +1389,7 @@ function PatientListScreen({ patients, setCurrentScreen }) {
                   {compliance}%
                 </div>
                 {patient.alerts?.length > 0 && (
-                  <span style={styles.plcAlert}>âš ️</span>
+                  <span style={styles.plcAlert}>⚠️</span>
                 )}
               </div>
             </div>
@@ -1370,7 +1422,7 @@ function PatientDetailScreen({ patient, onBack }) {
         {patient.alerts?.length > 0 && (
           <div style={styles.pdAlerts}>
             {patient.alerts.map((alert, idx) => (
-              <div key={idx} style={styles.pdAlertItem}>âš ️ {alert}</div>
+              <div key={idx} style={styles.pdAlertItem}>⚠️ {alert}</div>
             ))}
           </div>
         )}
@@ -1748,7 +1800,7 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
     { id: 'patients', icon: '👥', label: 'Patients' },
     { id: 'messages', icon: '💬', label: 'Messages' },
     { id: 'analytics', icon: '📊', label: 'Analytics' },
-    { id: 'settings', icon: 'âš™️', label: 'Settings' },
+    { id: 'settings', icon: '⚙️', label: 'Settings' },
   ];
 
   return (
@@ -1775,6 +1827,7 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
+  const [tool, setTool] = useState(null); // weight | symptoms | photos | labs | coach
 
   // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
   // was logged in previous sessions today, not the stale starting values.
@@ -1845,6 +1898,14 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   if (showFoodLog) {
     return <FoodLogScreen user={user} setUser={setUser} onBack={() => setShowFoodLog(false)} />;
   }
+
+  if (tool === 'weight')   return <WeightLogScreen onBack={() => setTool(null)} />;
+  if (tool === 'symptoms') return <SymptomsScreen onBack={() => setTool(null)} />;
+  if (tool === 'photos')   return <ProgressPhotosScreen onBack={() => setTool(null)} />;
+  if (tool === 'labs')     return <LabsScreen onBack={() => setTool(null)} />;
+  if (tool === 'coach')    return <MealCoachScreen onBack={() => setTool(null)} />;
+  if (tool === 'workout')  return <WorkoutLogScreen onBack={() => setTool(null)} />;
+  if (tool === 'bodyscan') return <BodyScanScreen onBack={() => setTool(null)} />;
 
   return (
     <div style={styles.screenContent} className="fade-in">
@@ -1966,6 +2027,9 @@ function HomeScreen({ user, setUser, setActiveModal }) {
           </div>
         </div>
       </section>
+
+      {/* Track Your Progress: 5 health-tools entry cards */}
+      <HealthToolsSection onOpen={(t) => setTool(t)} />
     </div>
   );
 }
@@ -3050,7 +3114,7 @@ function MealPlanSetup({ user, onComplete, onCancel }) {
   ];
 
   const cookingTimeOptions = [
-    { id: 'minimal', name: 'Minimal (< 15 min)', icon: 'âš¡' },
+    { id: 'minimal', name: 'Minimal (< 15 min)', icon: '⚡' },
     { id: 'quick', name: 'Quick (15-30 min)', icon: '🕐' },
     { id: 'moderate', name: 'Moderate (30-45 min)', icon: '🕑' },
     { id: 'any', name: 'Any time is fine', icon: '👨‍🍳' },
@@ -3090,91 +3154,30 @@ Daily Protein Target: ${proteinTarget}g minimum
     `.trim();
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/meal-plan-generator`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 4000,
-          messages: [{
-            role: 'user',
-            content: `You are a nutrition AI creating a personalized 7-day meal plan for a GLP-1 weight loss patient. This person is on medication like Ozempic, Wegovy, or Mounjaro.
-
-Patient Info & Dietary Preferences:
-${prefsDescription}
-
-CRITICAL GLP-1 NUTRITION REQUIREMENTS:
-1. HIGH PROTEIN: ${Math.round(proteinTarget / preferences.mealsPerDay)}g+ protein per meal minimum (${proteinTarget}g daily - crucial for muscle preservation during weight loss)
-2. CALORIE TARGET: ${calorieTarget} calories daily (calculated from patient's current weight of ${currentWeight} lbs at 10.5 cal/lb)
-3. MODERATE FIBER: 25-30g daily total (helps with satiety but too much can cause GI issues with GLP-1)
-4. SMALLER PORTIONS: GLP-1 reduces appetite, so portions should be satisfying but not overwhelming
-5. HYDRATION FOCUS: Include water-rich foods; GLP-1 can reduce thirst sensation
-6. AVOID: Greasy/fried foods, very high-fat meals, excessive sugar (can cause dumping syndrome)
-7. PROTEIN FIRST: Structure meals to eat protein first, then vegetables, then carbs
-
-Create a JSON response with this structure (respond ONLY with JSON, no markdown):
-{
-  "weeklyPlan": [
-    {
-      "day": "Monday",
-      "meals": [
-        {
-          "type": "breakfast",
-          "name": "Meal Name",
-          "description": "Brief appetizing description",
-          "calories": 350,
-          "protein": 30,
-          "carbs": 25,
-          "fat": 12,
-          "fiber": 6,
-          "ingredients": ["ingredient 1 with amount", "ingredient 2 with amount"],
-          "instructions": "Brief prep instructions (2-3 sentences)",
-          "glp1Tip": "Specific tip for eating this meal on GLP-1",
-          "prepTime": "15 min"
-        }
-      ],
-      "snacks": [
-        {
-          "name": "Snack name",
-          "emoji": "🍎",
-          "calories": 150,
-          "protein": 10,
-          "description": "Brief description"
-        }
-      ],
-      "dailyTotals": {
-        "calories": ${calorieTarget},
-        "protein": ${proteinTarget},
-        "fiber": 28
-      }
-    }
-  ],
-  "hydrationTip": "Personalized hydration advice for this person",
-  "weeklyTips": ["tip 1 for success", "tip 2", "tip 3"],
-  "groceryCategories": {
-    "proteins": ["item1", "item2"],
-    "produce": ["item1", "item2"],
-    "dairy": ["item1", "item2"],
-    "pantry": ["item1", "item2"]
-  }
-}
-
-Make meals delicious, varied, and realistic to prepare. Include a mix of simple and slightly more elaborate options. Each day should have ${preferences.mealsPerDay} meals and ${preferences.snacksPerDay} snack options. Target ${minCalories}-${maxCalories} calories daily with at least ${proteinTarget}g protein. Distribute calories appropriately across meals.`
-          }]
-        })
+          preferences: {
+            dietType: preferences.dietType,
+            allergies: preferences.allergies,
+            dislikes: preferences.dislikes,
+            cuisines: preferences.cuisines,
+            cookingTime: preferences.cookingTime,
+            mealsPerDay: preferences.mealsPerDay,
+            snacksPerDay: preferences.snacksPerDay,
+          },
+          currentWeight,
+        }),
       });
 
-      const data = await response.json();
-      const planText = data.content.map(c => c.text || '').join('');
-      
-      let mealPlan;
-      try {
-        const cleanJson = planText.replace(/```json|```/g, '').trim();
-        mealPlan = JSON.parse(cleanJson);
-      } catch {
-        mealPlan = getDefaultMealPlan(preferences, calorieTarget, proteinTarget);
-      }
-
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const mealPlan = await response.json();
+      if (!mealPlan?.weeklyPlan?.length) throw new Error('empty plan');
       onComplete(preferences, mealPlan);
 
     } catch (error) {
@@ -3541,7 +3544,7 @@ Make meals delicious, varied, and realistic to prepare. Include a mix of simple 
         <div style={styles.mpSummaryBox}>
           <h4 style={styles.mpSummaryTitle}>Your Preferences Summary</h4>
           <p style={styles.mpSummaryItem}>🍽️ Diet: {dietTypes.find(d => d.id === preferences.dietType)?.name || 'Omnivore'}</p>
-          <p style={styles.mpSummaryItem}>âš ️ Allergies: {preferences.allergies.length > 0 ? preferences.allergies.join(', ') : 'None'}</p>
+          <p style={styles.mpSummaryItem}>⚠️ Allergies: {preferences.allergies.length > 0 ? preferences.allergies.join(', ') : 'None'}</p>
           <p style={styles.mpSummaryItem}>🌍 Cuisines: {preferences.cuisines.length > 0 ? preferences.cuisines.slice(0, 3).join(', ') : 'Any'}</p>
           <p style={styles.mpSummaryItem}>⏱️ Cooking: {cookingTimeOptions.find(c => c.id === preferences.cookingTime)?.name || 'Any'}</p>
         </div>
@@ -6328,7 +6331,7 @@ function FitnessScreen({ user, setUser }) {
     );
   }
 
-  return <FitnessHomeScreen user={user} />;
+  return <FitnessHomeScreen user={user} onStartWorkout={() => setShowWorkoutPlayer(true)} />;
 }
 
 // AI Fitness Assessment Component
@@ -6608,67 +6611,21 @@ function AIFitnessAssessment({ onComplete, onCancel }) {
     const selectedFrames = frameIndices.map(i => capturedFrames[Math.min(i, capturedFrames.length - 1)]);
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/exercise-form-analysis`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              ...selectedFrames.map((frame, idx) => ({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/jpeg',
-                  data: frame.split(',')[1]
-                }
-              })),
-              {
-                type: 'text',
-                text: `You are a fitness assessment AI for a GLP-1 wellness app. Analyze these ${selectedFrames.length} images of a person performing a "${exercise.name}" exercise.
-
-The person was instructed to: "${exercise.instruction}"
-
-Please analyze their form and provide a JSON response with the following structure (respond ONLY with JSON, no markdown):
-{
-  "exerciseDetected": true/false,
-  "formScore": 1-10,
-  "observations": ["observation 1", "observation 2"],
-  "strengths": ["strength 1", "strength 2"],
-  "improvements": ["improvement 1", "improvement 2"],
-  "mobilityLevel": "limited" | "moderate" | "good" | "excellent",
-  "safetyNotes": ["any safety concerns"]
-}
-
-Be encouraging but honest. Consider that this person is on a GLP-1 medication for weight management and may be new to exercise. Focus on what they did well while noting areas for improvement.`
-              }
-            ]
-          }]
-        })
+          exercise: { id: exercise.id, name: exercise.name, instruction: exercise.instruction },
+          frames: selectedFrames.map(f => f.split(',')[1]).filter(Boolean),
+        }),
       });
 
-      const data = await response.json();
-      const analysisText = data.content.map(c => c.text || '').join('');
-      
-      // Parse JSON from response
-      let analysis;
-      try {
-        const cleanJson = analysisText.replace(/```json|```/g, '').trim();
-        analysis = JSON.parse(cleanJson);
-      } catch {
-        // Default analysis if parsing fails
-        analysis = {
-          exerciseDetected: true,
-          formScore: 7,
-          observations: ['Movement detected and analyzed'],
-          strengths: ['Good effort and willingness to assess'],
-          improvements: ['Continue practicing for better form'],
-          mobilityLevel: 'moderate',
-          safetyNotes: []
-        };
-      }
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const analysis = await response.json();
 
       setAnalysisResults(prev => [...prev, { exercise: exercise.id, ...analysis }]);
       setIsAnalyzing(false);
@@ -6719,84 +6676,23 @@ Be encouraging but honest. Consider that this person is on a GLP-1 medication fo
       : 'No equipment (bodyweight only)';
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const token = authApi.loadToken();
+      const response = await fetch(`${PROVIDER_API_BASE}/api/workout-plan-generator`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: `You are a fitness coach AI creating a personalized workout plan for a GLP-1 patient. Based on these fitness assessment results and available equipment, create a comprehensive but gentle workout plan.
-
-Assessment Results:
-${JSON.stringify(allResults, null, 2)}
-
-Available Equipment: ${equipmentList}
-
-Create a JSON response with this structure (respond ONLY with JSON, no markdown):
-{
-  "overallLevel": "beginner" | "intermediate" | "advanced",
-  "overallScore": 1-100,
-  "summary": "2-3 sentence summary of their fitness level",
-  "strengths": ["key strength 1", "key strength 2", "key strength 3"],
-  "focusAreas": ["area to improve 1", "area to improve 2"],
-  "equipmentUsed": ["list of equipment incorporated into the plan"],
-  "weeklyPlan": {
-    "daysPerWeek": 3-5,
-    "minutesPerSession": 15-45,
-    "workouts": [
-      {
-        "day": "Monday",
-        "name": "Workout Name",
-        "type": "strength" | "cardio" | "flexibility" | "balance",
-        "duration": "XX min",
-        "exercises": [
-          {"name": "Exercise", "sets": "X", "reps": "X", "equipment": "equipment needed or bodyweight", "notes": "any modifications"}
-        ]
-      }
-    ]
-  },
-  "safetyRecommendations": ["recommendation 1", "recommendation 2"],
-  "progressionTips": ["tip for advancing over time"],
-  "equipmentToBuy": ["optional equipment that would enhance their workouts"]
-}
-
-Important considerations:
-- This person is on GLP-1 medication for weight management
-- Focus on muscle preservation (very important during weight loss)
-- ONLY use exercises that match their available equipment: ${equipmentList}
-- Include low-impact options
-- Emphasize consistency over intensity
-- Make it achievable and encouraging
-- If they have limited equipment, be creative with bodyweight variations
-
-CRITICAL — EXERCISE NAMING:
-The app shows a demo video for each exercise. Videos are matched by exact name, so you MUST choose names from the supported list below whenever possible. Use the exact spelling shown.
-
-Supported exercise names (pick from these):
-- Beginner / low-impact: Wall Push-ups, Chair Squats, Standing Marches, Arm Circles, Seated Leg Lifts, Wall Slides, Calf Raises, Walking, Single Leg Stands
-- Bodyweight strength: Push-ups, Squats, Bodyweight Squats, Lunges, Plank, Glute Bridges, Bird Dogs, Mountain Climbers, Jumping Jacks, Burpees, Standing Rows
-- Dumbbell: Dumbbell Rows, Bent Over Rows, Dumbbell Press, Shoulder Press, Bicep Curls, Tricep Extensions, Goblet Squats, Deadlifts, Romanian Deadlifts, Lateral Raises
-- Resistance band: Band Pull Aparts, Banded Rows, Band Squats
-- Core: Crunches, Russian Twists, Leg Raises, Dead Bugs, Side Planks
-- Stretching / mobility: Cat-Cow, Gentle Stretching, Hip Flexor Stretch, Hamstring Stretch, Quad Stretch, Shoulder Stretch, Child's Pose
-
-Only invent a new exercise name if nothing in the list fits. Prefer names from the list.`
-          }]
-        })
+          assessmentResults: allResults,
+          equipment,
+          equipmentList,
+        }),
       });
 
-      const data = await response.json();
-      const planText = data.content.map(c => c.text || '').join('');
-      
-      let plan;
-      try {
-        const cleanJson = planText.replace(/```json|```/g, '').trim();
-        plan = JSON.parse(cleanJson);
-      } catch {
-        plan = getDefaultPlan();
-      }
+      if (!response.ok) throw new Error(`server returned ${response.status}`);
+      const plan = await response.json();
+      if (!plan?.weeklyPlan) throw new Error('empty plan');
 
       setFinalResults(plan);
       setStage('results');
@@ -7259,7 +7155,7 @@ Only invent a new exercise name if nothing in the list fits. Prefer names from t
         </div>
 
         <div style={styles.safetySection}>
-          <h4 style={styles.safetyTitle}>âš ️ Safety Notes</h4>
+          <h4 style={styles.safetyTitle}>⚠️ Safety Notes</h4>
           {finalResults.safetyRecommendations.map((s, i) => (
             <p key={i} style={styles.safetyItem}>• {s}</p>
           ))}
@@ -7289,7 +7185,7 @@ Only invent a new exercise name if nothing in the list fits. Prefer names from t
 }
 
 // Fitness Home Screen (after assessment)
-function FitnessHomeScreen({ user }) {
+function FitnessHomeScreen({ user, onStartWorkout }) {
   const plan = user.workoutPlan;
   const todayWorkout = plan?.weeklyPlan?.workouts?.[0] || {
     name: 'Gentle Strength',
@@ -7349,9 +7245,9 @@ function FitnessHomeScreen({ user }) {
           <span style={styles.todayTag}>{user.fitnessLevel || 'Beginner'}</span>
           <span style={styles.todayTag}>{todayWorkout.type}</span>
         </div>
-        <button 
+        <button
           style={styles.primaryButtonWhite}
-          onClick={() => setShowWorkoutPlayer(true)}
+          onClick={onStartWorkout}
         >
           Start Workout
         </button>
@@ -7739,7 +7635,7 @@ function TreatmentsScreen({ setActiveModal }) {
   const [activeCategory, setActiveCategory] = useState('weight-loss');
 
   const categories = [
-    { id: 'weight-loss', name: 'Weight Loss', icon: 'âš–️' },
+    { id: 'weight-loss', name: 'Weight Loss', icon: '⚖️' },
     { id: 'iv-therapy', name: 'IV Therapy', icon: '💧' },
     { id: 'vitamin-boosters', name: 'Boosters', icon: '💉' },
     { id: 'hormone', name: 'Hormone', icon: '🧬' },
@@ -10712,7 +10608,7 @@ async function compressImageForVision(file, maxEdge = 1280, quality = 0.85) {
   };
 }
 
-// Snap-a-meal flow: capture a photo, send to Claude vision, let the patient
+// Snap-a-meal flow: capture a photo, send to AI vision (Gemma), let the patient
 // confirm/edit the parsed items, then write them to the food log.
 function PhotoFoodModal({ onClose, onConfirm }) {
   const [stage, setStage] = useState('capture'); // capture | analyzing | review | error
@@ -10720,12 +10616,26 @@ function PhotoFoodModal({ onClose, onConfirm }) {
   const [base64, setBase64] = useState(null);
   const [mimeType, setMimeType] = useState('image/jpeg');
   const [note, setNote] = useState('');
-  const [error, setError] = useState(null);
+  const [error, setErrorRaw] = useState(null);
   const [items, setItems] = useState([]);
   const [mealGuess, setMealGuess] = useState('Snacks');
   const [summary, setSummary] = useState('');
   const [warnings, setWarnings] = useState([]);
   const fileInputRef = useRef(null);
+  const libraryInputRef = useRef(null);
+
+  // Defensive scrub: any upstream error message that mentions Anthropic or
+  // Claude (eg. when a stale deploy is still serving the old backend) gets
+  // rebranded to Gemma before the patient sees it.
+  const setError = (msg) => {
+    if (!msg) return setErrorRaw(msg);
+    const cleaned = String(msg)
+      .replace(/\bAnthropic API\b/gi, 'Gemma API')
+      .replace(/\bAnthropic\b/gi, 'Gemma')
+      .replace(/\bClaude API\b/gi, 'Gemma API')
+      .replace(/\bClaude\b/gi, 'Gemma');
+    setErrorRaw(cleaned);
+  };
 
   const pickFile = (e) => {
     const file = e.target.files?.[0];
@@ -10838,11 +10748,21 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                     onChange={pickFile}
                     style={{display:'none'}}
                   />
+                  <input
+                    ref={libraryInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={pickFile}
+                    style={{display:'none'}}
+                  />
                   <button
                     style={{...styles.primaryButton, marginBottom: 10}}
                     onClick={() => fileInputRef.current?.click()}
                   >📷 Take photo</button>
-                  <p style={{fontSize:11,color:'#9B9B9B'}}>You can also choose an existing photo.</p>
+                  <button
+                    style={{...styles.secondaryButton, marginBottom: 10}}
+                    onClick={() => libraryInputRef.current?.click()}
+                  >🖼️ Choose from library</button>
                 </div>
               ) : (
                 <>
@@ -18994,3 +18914,1436 @@ const styles = {
     gap: '10px',
   },
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// Health Tools — five self-contained screens patient can reach from Home.
+// Each screen carries its own inline styles so it doesn't have to fight the
+// 19k-line styles object above. All five call the healthApi helper, which
+// rides the existing patient_app_sessions Bearer token.
+// ════════════════════════════════════════════════════════════════════════════
+
+const toolStyles = {
+  screen: { padding: '20px 18px 100px', overflowY: 'auto', height: '100%', background: '#FAFAF7' },
+  header: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 },
+  back: { background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', padding: 4, color: '#4A6741' },
+  title: { fontSize: 22, fontWeight: 600, margin: 0, fontFamily: 'Fraunces, serif', color: '#2C2C2C' },
+  card: { background: '#fff', border: '1px solid #E8E5DF', borderRadius: 14, padding: 16, marginBottom: 14, boxShadow: '0 1px 3px rgba(0,0,0,0.03)' },
+  label: { fontSize: 11, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 },
+  big: { fontSize: 32, fontWeight: 600, color: '#2C2C2C', fontFamily: 'Fraunces, serif' },
+  small: { fontSize: 12, color: '#6B6B6B' },
+  btnPrimary: { background: '#4A6741', color: '#fff', border: 'none', padding: '12px 18px', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer', width: '100%' },
+  btnSecondary: { background: '#fff', color: '#4A6741', border: '1px solid #4A6741', padding: '10px 16px', borderRadius: 10, fontSize: 13, fontWeight: 500, cursor: 'pointer', width: '100%', marginTop: 8 },
+  btnSubtle: { background: 'none', border: 'none', color: '#4A6741', fontSize: 13, cursor: 'pointer', padding: '6px 0' },
+  input: { width: '100%', padding: '12px 14px', border: '1px solid #E8E5DF', borderRadius: 10, fontSize: 16, color: '#2C2C2C', boxSizing: 'border-box', marginTop: 6 },
+  row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  badge: (color) => ({ display: 'inline-block', padding: '3px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600, background: color + '20', color }),
+  banner: (color) => ({ background: color + '12', border: `1px solid ${color}40`, borderLeft: `4px solid ${color}`, borderRadius: 8, padding: '12px 14px', marginBottom: 14 }),
+  errorText: { color: '#C24A4A', fontSize: 13, margin: '8px 0' },
+  empty: { textAlign: 'center', padding: '40px 20px', color: '#9B9B9B' },
+};
+
+const SEVERITY_COLOR = { green: '#4A6741', amber: '#C4956A', red: '#C24A4A' };
+const TONE_COLOR = { good: '#4A6741', watch: '#C4956A', concern: '#C24A4A', celebrate: '#4A6741', encourage: '#4A6741', redirect: '#C4956A' };
+
+function ToolHeader({ title, onBack }) {
+  return (
+    <div style={toolStyles.header}>
+      <button style={toolStyles.back} onClick={onBack} aria-label="Back">←</button>
+      <h1 style={toolStyles.title}>{title}</h1>
+    </div>
+  );
+}
+
+// ── Weight + body comp ─────────────────────────────────────────────────────
+function WeightLogScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [plateau, setPlateau] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showLog, setShowLog] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.weights.list();
+      setEntries(d.entries || []);
+      setPlateau(d.plateau || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const latest = entries[0];
+  const prev = entries[1];
+  const delta = latest && prev ? (latest.weightLbs - prev.weightLbs) : null;
+
+  // Sparkline: last 12 entries, scaled to 200x40
+  const spark = (() => {
+    const recent = entries.slice(0, 12).reverse();
+    if (recent.length < 2) return null;
+    const vals = recent.map(e => e.weightLbs);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const range = max - min || 1;
+    const pts = recent.map((e, i) => {
+      const x = (i / (recent.length - 1)) * 200;
+      const y = 40 - ((e.weightLbs - min) / range) * 36 - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return pts;
+  })();
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Weight & body comp" onBack={onBack} />
+
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {plateau?.plateau && (
+        <div style={toolStyles.banner('#C4956A')}>
+          <strong style={{ color: '#8B5E2F' }}>Weight stalled past {plateau.windowDays} days</strong>
+          <p style={{ ...toolStyles.small, margin: '4px 0 8px' }}>
+            Plateaus are normal — but they're often a sign it's time to look at dose, sleep, or strength training.
+          </p>
+          <button style={{ ...toolStyles.btnPrimary, background: '#C4956A' }}
+                  onClick={() => alert('Booking dose-review consult — coming soon')}>
+            Book a dose review
+          </button>
+        </div>
+      )}
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>Current</p>
+        <div style={toolStyles.row}>
+          <span style={toolStyles.big}>{latest ? `${latest.weightLbs.toFixed(1)} lbs` : '— lbs'}</span>
+          {delta != null && (
+            <span style={toolStyles.badge(delta < 0 ? '#4A6741' : delta > 0 ? '#C4956A' : '#9B9B9B')}>
+              {delta > 0 ? '+' : ''}{delta.toFixed(1)} lbs
+            </span>
+          )}
+        </div>
+        {latest?.bodyFatPct != null && (
+          <p style={{ ...toolStyles.small, marginTop: 6 }}>Body fat {latest.bodyFatPct}%
+            {latest.muscleLbs != null ? `  •  Muscle ${latest.muscleLbs} lbs` : ''}
+          </p>
+        )}
+        {spark && (
+          <svg viewBox="0 0 200 40" width="100%" height={40} style={{ marginTop: 10 }}>
+            <polyline fill="none" stroke="#4A6741" strokeWidth="2" points={spark} />
+          </svg>
+        )}
+        <p style={{ ...toolStyles.small, marginTop: 6 }}>Last {Math.min(entries.length, 12)} readings</p>
+      </div>
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowLog(true)}>+ Log weight</button>
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && entries.length === 0 && <p style={toolStyles.empty}>No weights logged yet. Tap “Log weight” above to start.</p>}
+      {entries.slice(0, 30).map(e => (
+        <div key={e.id} style={{ ...toolStyles.card, padding: '10px 14px' }}>
+          <div style={toolStyles.row}>
+            <div>
+              <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{e.weightLbs.toFixed(1)} lbs</strong>
+              {e.bodyFatPct != null && <span style={toolStyles.small}>  •  {e.bodyFatPct}% bf</span>}
+            </div>
+            <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+          </div>
+          {e.source !== 'manual' && <span style={{ ...toolStyles.small, fontSize: 10 }}>via {e.source}</span>}
+        </div>
+      ))}
+
+      {showLog && <WeightLogModal onClose={() => setShowLog(false)} onSaved={() => { setShowLog(false); refresh(); }} />}
+    </div>
+  );
+}
+
+function WeightLogModal({ onClose, onSaved }) {
+  const [stage, setStage] = useState('form'); // form | scanning | error
+  const [weightLbs, setWeightLbs] = useState('');
+  const [bodyFatPct, setBodyFatPct] = useState('');
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [source, setSource] = useState('manual');
+  const fileRef = useRef(null);
+
+  const pickScalePhoto = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    setStage('scanning');
+    compressImageForVision(file).then(async ({ base64, mimeType }) => {
+      try {
+        const d = await healthApi.weights.scaleOcr(base64, mimeType);
+        setWeightLbs(String(d.weightLbs));
+        if (d.bodyFatPct != null) setBodyFatPct(String(d.bodyFatPct));
+        setSource('scale-ocr');
+        setStage('form');
+      } catch (err) {
+        setError(err.message);
+        setStage('form');
+      }
+    }).catch(() => { setError('Could not read that image.'); setStage('form'); });
+  };
+
+  const save = async () => {
+    setError(null);
+    const w = Number(weightLbs);
+    if (!Number.isFinite(w) || w < 40 || w > 800) {
+      setError('Enter a weight between 40 and 800 lbs.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await healthApi.weights.post({
+        weightLbs: w,
+        bodyFatPct: bodyFatPct ? Number(bodyFatPct) : null,
+        source,
+      });
+      onSaved();
+    } catch (e) { setError(e.message); setSubmitting(false); }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'flex-end', zIndex: 1000 }} onClick={onClose}>
+      <div style={{ background: '#fff', width: '100%', maxWidth: 480, margin: '0 auto', borderRadius: '20px 20px 0 0', padding: 20 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Log a weight</h2>
+
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={pickScalePhoto}
+          style={{ display: 'none' }}
+        />
+        <button style={toolStyles.btnSecondary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
+          {stage === 'scanning' ? 'Reading scale…' : '📸 Scan my scale'}
+        </button>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Weight (lbs)</p>
+        <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1" min="40" max="800"
+               value={weightLbs} onChange={e => setWeightLbs(e.target.value)} placeholder="180.0" />
+
+        <p style={{ ...toolStyles.label, marginTop: 12 }}>Body fat % (optional)</p>
+        <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1"
+               value={bodyFatPct} onChange={e => setBodyFatPct(e.target.value)} placeholder="—" />
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 16 }} onClick={save} disabled={submitting}>
+          {submitting ? 'Saving…' : 'Save weight'}
+        </button>
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Symptom check-in ────────────────────────────────────────────────────────
+const SYMPTOM_FIELDS = [
+  { key: 'nausea', label: 'Nausea' },
+  { key: 'constipation', label: 'Constipation' },
+  { key: 'fatigue', label: 'Fatigue' },
+  { key: 'injectionSite', label: 'Injection site reaction' },
+  { key: 'headache', label: 'Headache' },
+];
+const SYMPTOM_LEVELS = ['None', 'Mild', 'Moderate', 'Severe'];
+
+function SymptomsScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [loggedToday, setLoggedToday] = useState(false);
+  const [scores, setScores] = useState({ nausea: 0, constipation: 0, fatigue: 0, injectionSite: 0, headache: 0 });
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [lastResult, setLastResult] = useState(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const d = await healthApi.symptoms.list();
+      setEntries(d.entries || []);
+      setLoggedToday(!!d.loggedToday);
+      if (d.latest) setLastResult({ entry: d.latest, upsells: [] });
+    } catch (e) { setError(e.message); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const submit = async () => {
+    setSubmitting(true); setError(null);
+    try {
+      const d = await healthApi.symptoms.post({ ...scores, otherNotes: notes });
+      setLastResult(d);
+      setLoggedToday(true);
+      setScores({ nausea: 0, constipation: 0, fatigue: 0, injectionSite: 0, headache: 0 });
+      setNotes('');
+      refresh();
+    } catch (e) { setError(e.message); }
+    finally { setSubmitting(false); }
+  };
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="How are you feeling?" onBack={onBack} />
+
+      {lastResult?.entry && (
+        <div style={toolStyles.banner(SEVERITY_COLOR[lastResult.entry.severity] || '#4A6741')}>
+          <span style={toolStyles.badge(SEVERITY_COLOR[lastResult.entry.severity] || '#4A6741')}>
+            {lastResult.entry.severity === 'red' ? 'We will reach out today' :
+             lastResult.entry.severity === 'amber' ? 'Worth talking through' : 'All clear'}
+          </span>
+          {lastResult.upsells?.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <p style={{ ...toolStyles.small, fontWeight: 600, color: '#2C2C2C', margin: '4px 0' }}>Things that may help:</p>
+              {lastResult.upsells.map(u => (
+                <div key={u.sku} style={toolStyles.row}>
+                  <span style={toolStyles.small}>• {u.label}</span>
+                  <button style={toolStyles.btnSubtle} onClick={() => alert(`Adding ${u.label} — coming soon`)}>Add</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!loggedToday && (
+        <div style={toolStyles.card}>
+          <p style={{ ...toolStyles.small, marginBottom: 14 }}>Takes 30 seconds. Helps us tune your plan and flag anything that needs a call back.</p>
+          {SYMPTOM_FIELDS.map(f => (
+            <div key={f.key} style={{ marginBottom: 14 }}>
+              <p style={{ ...toolStyles.label, color: '#2C2C2C', marginBottom: 6 }}>{f.label}</p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {SYMPTOM_LEVELS.map((lvl, i) => (
+                  <button key={i}
+                          onClick={() => setScores(s => ({ ...s, [f.key]: i }))}
+                          style={{
+                            flex: 1, padding: '8px 4px', borderRadius: 8, fontSize: 11,
+                            border: '1px solid ' + (scores[f.key] === i ? '#4A6741' : '#E8E5DF'),
+                            background: scores[f.key] === i ? '#4A6741' : '#fff',
+                            color: scores[f.key] === i ? '#fff' : '#6B6B6B',
+                            cursor: 'pointer',
+                          }}>{lvl}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <p style={{ ...toolStyles.label, color: '#2C2C2C' }}>Anything else? (optional)</p>
+          <textarea style={{ ...toolStyles.input, minHeight: 60, fontFamily: 'inherit', resize: 'vertical' }}
+                    value={notes} onChange={e => setNotes(e.target.value)}
+                    placeholder="e.g. mild dizziness when I stand up" maxLength={500} />
+          {error && <p style={toolStyles.errorText}>{error}</p>}
+          <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={submit} disabled={submitting}>
+            {submitting ? 'Sending…' : 'Submit check-in'}
+          </button>
+        </div>
+      )}
+
+      {loggedToday && (
+        <div style={toolStyles.card}>
+          <p style={{ ...toolStyles.small }}>✓ You've already checked in today. Come back tomorrow!</p>
+        </div>
+      )}
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>Past 14 days</h3>
+      {entries.length === 0 && <p style={toolStyles.empty}>No check-ins yet.</p>}
+      {entries.slice(0, 14).map(e => (
+        <div key={e.id} style={{ ...toolStyles.card, padding: '10px 14px' }}>
+          <div style={toolStyles.row}>
+            <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+            <span style={toolStyles.badge(SEVERITY_COLOR[e.severity] || '#4A6741')}>{e.severity}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Progress photos + share card ───────────────────────────────────────────
+function ProgressPhotosScreen({ onBack }) {
+  const [photos, setPhotos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [angle, setAngle] = useState('front');
+  const [showCompare, setShowCompare] = useState(false);
+  const fileRef = useRef(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.photos.list(true);
+      setPhotos(d.photos || []);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const upload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    compressImageForVision(file, 1024, 0.82).then(async ({ base64, mimeType }) => {
+      try {
+        await healthApi.photos.post({ angle, image: base64, mimeType });
+        refresh();
+      } catch (err) { setError(err.message); }
+    }).catch(() => setError('Could not read that image.'));
+  };
+
+  const byAngle = (a) => photos.filter(p => p.angle === a).sort((a, b) => new Date(b.takenAt) - new Date(a.takenAt));
+  const latestPer = ['front', 'side', 'back'].map(a => ({ angle: a, photo: byAngle(a)[0] }));
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Progress photos" onBack={onBack} />
+
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {latestPer.map(({ angle: a, photo }) => (
+          <div key={a} style={{ ...toolStyles.card, padding: 6, textAlign: 'center', margin: 0 }}>
+            <p style={{ ...toolStyles.label, marginBottom: 4 }}>{a}</p>
+            {photo ? (
+              <img src={`data:${photo.mimeType};base64,${photo.image}`} alt={a}
+                   style={{ width: '100%', borderRadius: 8, aspectRatio: '3/4', objectFit: 'cover' }} />
+            ) : (
+              <div style={{ aspectRatio: '3/4', background: '#F0EDE7', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, color: '#C0BBB2' }}>+</div>
+            )}
+            {photo && <p style={{ ...toolStyles.small, fontSize: 10, marginTop: 4 }}>{new Date(photo.takenAt).toLocaleDateString()}</p>}
+          </div>
+        ))}
+      </div>
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>Angle for next photo</p>
+        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+          {['front', 'side', 'back'].map(a => (
+            <button key={a} onClick={() => setAngle(a)} style={{
+              flex: 1, padding: '8px', borderRadius: 8, fontSize: 12,
+              border: '1px solid ' + (angle === a ? '#4A6741' : '#E8E5DF'),
+              background: angle === a ? '#4A6741' : '#fff',
+              color: angle === a ? '#fff' : '#6B6B6B', cursor: 'pointer', textTransform: 'capitalize',
+            }}>{a}</button>
+          ))}
+        </div>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={upload} style={{ display: 'none' }} />
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={() => fileRef.current?.click()}>
+          📷 Take {angle} photo
+        </button>
+      </div>
+
+      {photos.length >= 2 && (
+        <button style={toolStyles.btnSecondary} onClick={() => setShowCompare(true)}>
+          Side-by-side compare
+        </button>
+      )}
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>All photos</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && photos.length === 0 && <p style={toolStyles.empty}>No photos yet — your first one will become your “before.”</p>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+        {photos.map(p => (
+          <div key={p.id} style={{ position: 'relative' }}>
+            <img src={`data:${p.mimeType};base64,${p.image}`} alt=""
+                 style={{ width: '100%', borderRadius: 6, aspectRatio: '3/4', objectFit: 'cover' }} />
+            <span style={{ position: 'absolute', bottom: 4, left: 4, background: 'rgba(0,0,0,0.5)', color: '#fff', fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>
+              {p.angle} • {new Date(p.takenAt).toLocaleDateString()}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {showCompare && <CompareModal photos={photos} onClose={() => setShowCompare(false)} />}
+    </div>
+  );
+}
+
+function CompareModal({ photos, onClose }) {
+  const sorted = [...photos].sort((a, b) => new Date(a.takenAt) - new Date(b.takenAt));
+  const [leftId, setLeftId] = useState(sorted[0]?.id);
+  const [rightId, setRightId] = useState(sorted[sorted.length - 1]?.id);
+  const left = sorted.find(p => p.id === leftId);
+  const right = sorted.find(p => p.id === rightId);
+
+  const share = async () => {
+    if (!left || !right) return;
+    // Compose a 2-up canvas with both photos + dates as a simple share card.
+    const loadImg = (p) => new Promise((res) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => res(null);
+      i.src = `data:${p.mimeType};base64,${p.image}`;
+    });
+    const [a, b] = await Promise.all([loadImg(left), loadImg(right)]);
+    if (!a || !b) return;
+    const w = 600, h = 800;
+    const canvas = document.createElement('canvas');
+    canvas.width = w * 2 + 40;
+    canvas.height = h + 100;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#FAFAF7';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(a, 10, 50, w, h);
+    ctx.drawImage(b, w + 30, 50, w, h);
+    ctx.fillStyle = '#2C2C2C';
+    ctx.font = '600 28px sans-serif';
+    ctx.fillText('My HYDR801 Progress', 10, 36);
+    ctx.font = '20px sans-serif';
+    ctx.fillStyle = '#6B6B6B';
+    ctx.fillText(new Date(left.takenAt).toLocaleDateString(), 10, h + 80);
+    ctx.fillText(new Date(right.takenAt).toLocaleDateString(), w + 30, h + 80);
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+      const file = new File([blob], 'hydr801-progress.jpg', { type: 'image/jpeg' });
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: 'My progress' }); return; } catch {}
+      }
+      // Fallback: download
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'hydr801-progress.jpg';
+      link.click();
+      URL.revokeObjectURL(url);
+    }, 'image/jpeg', 0.88);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, padding: 16, overflowY: 'auto' }} onClick={onClose}>
+      <div style={{ background: '#fff', maxWidth: 480, margin: '20px auto', borderRadius: 16, padding: 18 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Compare</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <p style={toolStyles.label}>Before</p>
+            <select value={leftId} onChange={e => setLeftId(e.target.value)} style={{ ...toolStyles.input, padding: '8px' }}>
+              {sorted.map(p => <option key={p.id} value={p.id}>{p.angle} • {new Date(p.takenAt).toLocaleDateString()}</option>)}
+            </select>
+            {left && <img src={`data:${left.mimeType};base64,${left.image}`} alt="" style={{ width: '100%', marginTop: 8, borderRadius: 8 }} />}
+          </div>
+          <div>
+            <p style={toolStyles.label}>After</p>
+            <select value={rightId} onChange={e => setRightId(e.target.value)} style={{ ...toolStyles.input, padding: '8px' }}>
+              {sorted.map(p => <option key={p.id} value={p.id}>{p.angle} • {new Date(p.takenAt).toLocaleDateString()}</option>)}
+            </select>
+            {right && <img src={`data:${right.mimeType};base64,${right.image}`} alt="" style={{ width: '100%', marginTop: 8, borderRadius: 8 }} />}
+          </div>
+        </div>
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 16 }} onClick={share}>📤 Share progress</button>
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Labs ────────────────────────────────────────────────────────────────────
+const PANEL_LABEL = { CMP: 'Metabolic panel', CBC: 'Blood count', A1C: 'A1c', LIPID: 'Lipids', TSH: 'Thyroid', VITAMIN_D: 'Vitamin D', HORMONE: 'Hormones', MICRO_NUTRIENT: 'Micronutrients' };
+
+function LabsScreen({ onBack }) {
+  const [data, setData] = useState({ schedules: [], results: [], dueSoon: [], latestByPanel: {} });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await healthApi.labs.dashboard();
+        setData(d);
+        setError(null);
+      } catch (e) { setError(e.message); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="My labs" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {data.dueSoon?.length > 0 && (
+        <div style={toolStyles.banner('#C4956A')}>
+          <strong style={{ color: '#8B5E2F' }}>Due soon</strong>
+          {data.dueSoon.map(s => (
+            <p key={s.id} style={{ ...toolStyles.small, margin: '4px 0' }}>
+              {PANEL_LABEL[s.panel] || s.panel} — {s.nextDueDate ? new Date(s.nextDueDate).toLocaleDateString() : 'now'}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+
+      {!loading && data.schedules.length === 0 && data.results.length === 0 && (
+        <p style={toolStyles.empty}>No labs scheduled or on file yet. Your provider will add panels here after your next visit.</p>
+      )}
+
+      {data.schedules.map(s => {
+        const latest = data.latestByPanel[s.panel];
+        return (
+          <div key={s.id} style={toolStyles.card} onClick={() => latest && setSelected(latest)}>
+            <div style={toolStyles.row}>
+              <div>
+                <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{PANEL_LABEL[s.panel] || s.panel}</strong>
+                <p style={toolStyles.small}>Every {s.intervalDays} days</p>
+              </div>
+              {latest?.hasOutOfRange && <span style={toolStyles.badge('#C4956A')}>review</span>}
+              {latest && !latest.hasOutOfRange && <span style={toolStyles.badge('#4A6741')}>in range</span>}
+            </div>
+            {latest && <p style={{ ...toolStyles.small, marginTop: 6 }}>Last drawn {new Date(latest.drawnAt).toLocaleDateString()}</p>}
+          </div>
+        );
+      })}
+
+      {selected && <LabDetailModal result={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+function LabDetailModal({ result, onClose }) {
+  const [explainer, setExplainer] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const explain = async () => {
+    setLoading(true); setError(null);
+    try {
+      const d = await healthApi.labs.explain(result.id);
+      setExplainer(d);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, padding: 16, overflowY: 'auto' }} onClick={onClose}>
+      <div style={{ background: '#fff', maxWidth: 480, margin: '20px auto', borderRadius: 16, padding: 20 }} onClick={e => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 4 }}>{PANEL_LABEL[result.panel] || result.panel}</h2>
+        <p style={toolStyles.small}>Drawn {new Date(result.drawnAt).toLocaleDateString()}</p>
+
+        {explainer && (
+          <div style={toolStyles.banner(TONE_COLOR[explainer.tone] || '#4A6741')}>
+            <p style={{ margin: 0, fontSize: 14, color: '#2C2C2C' }}>{explainer.explanation}</p>
+            {explainer.actions?.length > 0 && (
+              <ul style={{ ...toolStyles.small, marginTop: 8, paddingLeft: 18 }}>
+                {explainer.actions.map((a, i) => <li key={i}>{a}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: 14 }}>
+          {result.markers.map((m, i) => (
+            <div key={i} style={{ ...toolStyles.row, padding: '8px 0', borderBottom: '1px solid #F0EDE7' }}>
+              <span style={{ fontSize: 13 }}>{m.name}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: m.flag === 'critical' ? '#C24A4A' : m.flag === 'high' || m.flag === 'low' ? '#C4956A' : '#4A6741' }}>
+                {m.value}{m.unit ? ' ' + m.unit : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+        {!explainer && (
+          <button style={{ ...toolStyles.btnPrimary, marginTop: 14 }} onClick={explain} disabled={loading}>
+            {loading ? 'Reading your results…' : '🤖 Explain in plain English'}
+          </button>
+        )}
+        <button style={toolStyles.btnSubtle} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Meal coach ─────────────────────────────────────────────────────────────
+const UPSELL_COPY = {
+  'rd-consult': { label: 'Book a dietitian call', detail: '20 min 1:1 video — $49' },
+  'iv-hydration': { label: 'Book IV hydration', detail: 'B-complex + electrolytes in-clinic' },
+  'inbody-scan': { label: 'Schedule InBody scan', detail: 'See exactly what changed — muscle vs fat' },
+  'dose-review': { label: 'Schedule dose review', detail: 'NP visit to discuss titration' },
+};
+
+function MealCoachScreen({ onBack }) {
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async (force = false) => {
+    if (force) setRefreshing(true); else setLoading(true);
+    try {
+      const d = await healthApi.mealCoach.summary(force);
+      setSummary(d);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); setRefreshing(false); }
+  }, []);
+
+  useEffect(() => { load(false); }, [load]);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="AI meal coach" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      {loading && <p style={toolStyles.small}>Reading your week…</p>}
+
+      {summary && (
+        <>
+          <div style={toolStyles.banner(TONE_COLOR[summary.tone] || '#4A6741')}>
+            <p style={toolStyles.label}>This week</p>
+            <p style={{ margin: '6px 0 0', fontSize: 15, color: '#2C2C2C', lineHeight: 1.45 }}>{summary.summary}</p>
+          </div>
+
+          {summary.suggestions.map((s, i) => (
+            <div key={i} style={toolStyles.card}>
+              <strong style={{ fontSize: 15, color: '#2C2C2C' }}>{s.headline}</strong>
+              <p style={{ ...toolStyles.small, marginTop: 6, lineHeight: 1.5 }}>{s.detail}</p>
+              {s.upsellSku && UPSELL_COPY[s.upsellSku] && (
+                <div style={{ marginTop: 10, padding: 10, background: '#F7F4EE', borderRadius: 8 }}>
+                  <p style={{ ...toolStyles.label, color: '#8B5E2F', margin: 0 }}>{UPSELL_COPY[s.upsellSku].detail}</p>
+                  <button style={{ ...toolStyles.btnPrimary, background: '#C4956A', marginTop: 8, padding: '8px 14px', fontSize: 13 }}
+                          onClick={() => alert(`Booking ${UPSELL_COPY[s.upsellSku].label} — coming soon`)}>
+                    {UPSELL_COPY[s.upsellSku].label} →
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button style={toolStyles.btnSecondary} onClick={() => load(true)} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : '↻ Refresh this week'}
+          </button>
+          {summary.cached && (
+            <p style={{ ...toolStyles.small, textAlign: 'center', marginTop: 8 }}>
+              Cached • {new Date(summary.generatedAt).toLocaleDateString()}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Workouts ────────────────────────────────────────────────────────────────
+const WORKOUT_OPTIONS = [
+  { key: 'cardio',   label: 'Cardio',    icon: '🏃' },
+  { key: 'strength', label: 'Strength',  icon: '🏋️' },
+  { key: 'walk',     label: 'Walk',      icon: '🚶' },
+  { key: 'cycling',  label: 'Cycling',   icon: '🚴' },
+  { key: 'swimming', label: 'Swimming',  icon: '🏊' },
+  { key: 'yoga',     label: 'Yoga',      icon: '🧘' },
+  { key: 'other',    label: 'Other',     icon: '✨' },
+];
+const INTENSITY_LABEL = { light: 'Light', moderate: 'Moderate', vigorous: 'Vigorous' };
+const INTENSITY_COLOR = { light: '#9B9B9B', moderate: '#4A6741', vigorous: '#C24A4A' };
+
+function WorkoutLogScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [totals, setTotals] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showLog, setShowLog] = useState(null);          // null | { prefill }
+  const [showImport, setShowImport] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.workouts.list();
+      setEntries(d.entries || []);
+      setTotals(d.totals || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Workouts" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={toolStyles.card}>
+        <p style={toolStyles.label}>This week</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginTop: 8 }}>
+          <WkStat n={totals?.sessions ?? 0} label="sessions" />
+          <WkStat n={totals?.activeDays ?? 0} label="active days" />
+          <WkStat n={totals?.minutes ?? 0} label="minutes" />
+          <WkStat n={totals?.calories ?? 0} label="cal" />
+        </div>
+      </div>
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowLog({})}>+ Log workout</button>
+      <button style={toolStyles.btnSecondary} onClick={() => setShowImport(true)}>
+        📲 Import from Apple Health / Strava
+      </button>
+
+      <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+      {!loading && entries.length === 0 && (
+        <p style={toolStyles.empty}>No workouts logged yet. Tap “Log workout” to start.</p>
+      )}
+      {entries.map(e => {
+        const opt = WORKOUT_OPTIONS.find(o => o.key === e.type) || WORKOUT_OPTIONS[6];
+        return (
+          <div key={e.id} style={{ ...toolStyles.card, padding: '12px 14px' }}>
+            <div style={toolStyles.row}>
+              <div>
+                <strong style={{ color: '#2C2C2C', fontSize: 15 }}>{opt.icon} {opt.label}</strong>
+                <p style={{ ...toolStyles.small, margin: '2px 0 0' }}>
+                  {e.durationMin} min
+                  {e.caloriesBurned ? ` • ${e.caloriesBurned} cal` : ''}
+                  {e.distanceMi ? ` • ${e.distanceMi} mi` : ''}
+                  {e.avgHeartRate ? ` • ${e.avgHeartRate} bpm` : ''}
+                </p>
+              </div>
+              <span style={toolStyles.badge(INTENSITY_COLOR[e.intensity] || '#9B9B9B')}>
+                {INTENSITY_LABEL[e.intensity] || e.intensity}
+              </span>
+            </div>
+            <div style={{ ...toolStyles.row, marginTop: 6 }}>
+              <span style={toolStyles.small}>{new Date(e.recordedAt).toLocaleDateString()}</span>
+              {e.source !== 'manual' && (
+                <span style={{ ...toolStyles.small, fontSize: 10 }}>via {e.source}</span>
+              )}
+            </div>
+            {e.notes && <p style={{ ...toolStyles.small, marginTop: 6, fontStyle: 'italic' }}>“{e.notes}”</p>}
+          </div>
+        );
+      })}
+
+      {showLog && (
+        <WorkoutLogModal
+          prefill={showLog.prefill || null}
+          onClose={() => setShowLog(null)}
+          onSaved={() => { setShowLog(null); refresh(); }}
+        />
+      )}
+      {showImport && (
+        <WorkoutImportModal
+          onClose={() => setShowImport(false)}
+          onParsed={(parsed) => { setShowImport(false); setShowLog({ prefill: parsed }); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function WkStat({ n, label }) {
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 22, fontWeight: 600, color: '#2C2C2C', fontFamily: 'Fraunces, serif' }}>{n}</div>
+      <div style={{ fontSize: 10, color: '#9B9B9B', textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600 }}>{label}</div>
+    </div>
+  );
+}
+
+function WorkoutLogModal({ onClose, onSaved, prefill }) {
+  const [type, setType] = useState(prefill?.type || 'cardio');
+  const [durationMin, setDurationMin] = useState(prefill?.durationMin?.toString() || '30');
+  const [intensity, setIntensity] = useState(prefill?.intensity || 'moderate');
+  const [caloriesBurned, setCaloriesBurned] = useState(prefill?.caloriesBurned?.toString() || '');
+  const [distanceMi, setDistanceMi] = useState(prefill?.distanceMi?.toString() || '');
+  const [avgHeartRate, setAvgHeartRate] = useState(prefill?.avgHeartRate?.toString() || '');
+  const [recordedAt, setRecordedAt] = useState(prefill?.recordedAt || new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async () => {
+    const dur = parseInt(durationMin);
+    if (!Number.isFinite(dur) || dur < 1) { setError('Duration must be at least 1 minute.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await healthApi.workouts.post({
+        type, durationMin: dur, intensity,
+        caloriesBurned: caloriesBurned ? parseInt(caloriesBurned) : null,
+        distanceMi: distanceMi ? Number(distanceMi) : null,
+        avgHeartRate: avgHeartRate ? parseInt(avgHeartRate) : null,
+        notes: notes || null,
+        source: prefill ? 'screenshot-ocr' : 'manual',
+        recordedAt: new Date(`${recordedAt}T12:00:00`).toISOString(),
+      });
+      onSaved();
+    } catch (e) { setError(e.message); setSaving(false); }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>Log workout</h2>
+
+        <p style={toolStyles.label}>Type</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginTop: 6 }}>
+          {WORKOUT_OPTIONS.map(o => (
+            <button key={o.key} onClick={() => setType(o.key)}
+                    style={{
+                      background: type === o.key ? '#4A6741' : '#fff',
+                      color: type === o.key ? '#fff' : '#2C2C2C',
+                      border: `1px solid ${type === o.key ? '#4A6741' : '#E8E5DF'}`,
+                      borderRadius: 8, padding: '8px 4px', fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                    }}>
+              <div style={{ fontSize: 18 }}>{o.icon}</div>
+              <div style={{ marginTop: 2 }}>{o.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Duration (minutes)</p>
+        <input style={toolStyles.input} type="number" inputMode="numeric" min="1" max="600"
+               value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Intensity</p>
+        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          {['light','moderate','vigorous'].map(i => (
+            <button key={i} onClick={() => setIntensity(i)}
+                    style={{
+                      flex: 1,
+                      background: intensity === i ? INTENSITY_COLOR[i] : '#fff',
+                      color: intensity === i ? '#fff' : '#2C2C2C',
+                      border: `1px solid ${intensity === i ? INTENSITY_COLOR[i] : '#E8E5DF'}`,
+                      borderRadius: 8, padding: '10px 6px', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                    }}>
+              {INTENSITY_LABEL[i]}
+            </button>
+          ))}
+        </div>
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Calories <span style={{ textTransform: 'none', fontWeight: 400, color: '#9B9B9B' }}>(optional — auto-estimated)</span></p>
+        <input style={toolStyles.input} type="number" inputMode="numeric" placeholder="Auto"
+               value={caloriesBurned} onChange={(e) => setCaloriesBurned(e.target.value)} />
+
+        {(type === 'cardio' || type === 'walk' || type === 'cycling') && (
+          <>
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Distance (miles, optional)</p>
+            <input style={toolStyles.input} type="number" inputMode="decimal" step="0.01"
+                   value={distanceMi} onChange={(e) => setDistanceMi(e.target.value)} />
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Avg heart rate (bpm, optional)</p>
+            <input style={toolStyles.input} type="number" inputMode="numeric"
+                   value={avgHeartRate} onChange={(e) => setAvgHeartRate(e.target.value)} />
+          </>
+        )}
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Date</p>
+        <input style={toolStyles.input} type="date"
+               value={recordedAt} onChange={(e) => setRecordedAt(e.target.value)} />
+
+        <p style={{ ...toolStyles.label, marginTop: 14 }}>Notes</p>
+        <textarea style={{ ...toolStyles.input, minHeight: 60, resize: 'vertical', fontFamily: 'inherit' }}
+                  placeholder="How did it feel?"
+                  value={notes} onChange={(e) => setNotes(e.target.value)} />
+
+        {error && <p style={toolStyles.errorText}>{error}</p>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button style={{ ...toolStyles.btnSecondary, marginTop: 0, flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={{ ...toolStyles.btnPrimary, flex: 1 }} onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save workout'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkoutImportModal({ onClose, onParsed }) {
+  const [stage, setStage] = useState('idle'); // idle | scanning | error
+  const [error, setError] = useState(null);
+  const [warnings, setWarnings] = useState([]);
+  const fileRef = useRef(null);
+
+  const handle = async (file) => {
+    if (!file) return;
+    setStage('scanning'); setError(null); setWarnings([]);
+    try {
+      const base64 = await fileToBase64(file);
+      const mimeType = file.type || 'image/jpeg';
+      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
+      onParsed(parsed);
+    } catch (e) {
+      setError(e.message);
+      if (Array.isArray(e.warnings)) setWarnings(e.warnings);
+      setStage('error');
+    }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
+        <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+          On iPhone, open the Health or Fitness app → tap a workout → screenshot the summary, then pick it here.
+          We'll parse type, duration, calories, distance, and heart rate automatically.
+        </p>
+
+        <input ref={fileRef} type="file" accept="image/*"
+               style={{ display: 'none' }}
+               onChange={(e) => handle(e.target.files?.[0])} />
+        <button style={toolStyles.btnPrimary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
+          {stage === 'scanning' ? '🔍 Reading screenshot…' : '📷 Pick screenshot from gallery'}
+        </button>
+
+        {error && (
+          <div style={{ ...toolStyles.banner('#C24A4A'), marginTop: 14 }}>
+            <strong style={{ color: '#C24A4A' }}>{error}</strong>
+            {warnings.length > 0 && (
+              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                {warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Shared modal styles + file→base64 helper used by all the modals below.
+const modalBackdropStyle = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  zIndex: 1000, padding: 16,
+};
+const modalCardStyle = {
+  background: '#fff', borderRadius: 16, padding: 20,
+  width: '100%', maxWidth: 480, maxHeight: '90vh', overflowY: 'auto',
+};
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || '';
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Body scan (MediaPipe pose + segmentation, on-device) ────────────────────
+function BodyScanScreen({ onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [deltas, setDeltas] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showCapture, setShowCapture] = useState(false);
+  const [selected, setSelected] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await healthApi.bodyScans.list();
+      setEntries(d.entries || []);
+      setDeltas(d.deltas || null);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const latest = entries[0];
+
+  return (
+    <div style={toolStyles.screen} className="fade-in">
+      <ToolHeader title="Body scan" onBack={onBack} />
+      {error && <p style={toolStyles.errorText}>{error}</p>}
+
+      <div style={toolStyles.banner('#4A6741')}>
+        <strong style={{ color: '#2C4220' }}>📐 On-device body measurements</strong>
+        <p style={{ ...toolStyles.small, margin: '4px 0 0' }}>
+          Snap a front + side photo in fitted clothing. Measurements run on your phone — photos never leave the device.
+        </p>
+      </div>
+
+      {latest ? (
+        <BodyScanResultCard entry={latest} deltas={deltas} onView={() => setSelected(latest)} />
+      ) : (
+        <p style={toolStyles.empty}>No scans yet. Take your first one to lock in a baseline.</p>
+      )}
+
+      <button style={toolStyles.btnPrimary} onClick={() => setShowCapture(true)}>
+        {latest ? '+ New scan' : '📸 Start first scan'}
+      </button>
+
+      {entries.length > 1 && (
+        <>
+          <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>Scan history</h3>
+          {entries.slice(1).map(e => (
+            <button key={e.id}
+                    onClick={() => setSelected(e)}
+                    style={{ ...toolStyles.card, padding: '10px 14px', width: '100%', textAlign: 'left', cursor: 'pointer' }}>
+              <div style={toolStyles.row}>
+                <div>
+                  <strong style={{ color: '#2C2C2C' }}>{new Date(e.capturedAt).toLocaleDateString()}</strong>
+                  <p style={{ ...toolStyles.small, margin: '2px 0 0' }}>
+                    {e.measurements.waistIn != null && `Waist ${e.measurements.waistIn}"`}
+                    {e.bodyFatPctEstimate != null && ` • ${e.bodyFatPctEstimate}% bf`}
+                  </p>
+                </div>
+                <span style={{ ...toolStyles.small, color: '#4A6741' }}>view →</span>
+              </div>
+            </button>
+          ))}
+        </>
+      )}
+
+      {loading && <p style={toolStyles.small}>Loading…</p>}
+
+      {showCapture && (
+        <BodyScanCaptureModal
+          onClose={() => setShowCapture(false)}
+          onSaved={() => { setShowCapture(false); refresh(); }}
+        />
+      )}
+      {selected && (
+        <BodyScanDetailModal entry={selected} onClose={() => setSelected(null)} />
+      )}
+    </div>
+  );
+}
+
+function BodyScanResultCard({ entry, deltas, onView }) {
+  const m = entry.measurements;
+  const measureRow = (label, key, unit = '"') => {
+    const v = m[key];
+    const d = deltas?.[key];
+    if (v == null) return null;
+    return (
+      <div key={key} style={toolStyles.row}>
+        <span style={{ fontSize: 13, color: '#6B6B6B' }}>{label}</span>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>
+          {v}{unit}
+          {d != null && d !== 0 && (
+            <span style={{ ...toolStyles.badge(d < 0 ? '#4A6741' : '#C4956A'), marginLeft: 6 }}>
+              {d > 0 ? '+' : ''}{d}
+            </span>
+          )}
+        </span>
+      </div>
+    );
+  };
+
+  return (
+    <div style={toolStyles.card}>
+      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+        {entry.silhouetteSvg && (
+          <div style={{ flexShrink: 0, width: 100 }}
+               dangerouslySetInnerHTML={{ __html: entry.silhouetteSvg.replace('width="200"', 'width="100"').replace('height="400"', 'height="200"') }} />
+        )}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <p style={toolStyles.label}>Latest scan • {new Date(entry.capturedAt).toLocaleDateString()}</p>
+          {measureRow('Chest', 'chestIn')}
+          {measureRow('Waist', 'waistIn')}
+          {measureRow('Hips', 'hipsIn')}
+          {measureRow('Thigh', 'thighIn')}
+          {entry.bodyFatPctEstimate != null && measureRow('Body fat', 'bodyFatPctEstimate', '%')}
+        </div>
+      </div>
+      <button style={{ ...toolStyles.btnSubtle, marginTop: 8 }} onClick={onView}>See all measurements →</button>
+    </div>
+  );
+}
+
+function BodyScanDetailModal({ entry, onClose }) {
+  const m = entry.measurements;
+  const rows = [
+    ['Shoulders', m.shouldersIn, '"'],
+    ['Chest',     m.chestIn,     '"'],
+    ['Waist',     m.waistIn,     '"'],
+    ['Hips',      m.hipsIn,      '"'],
+    ['Thigh',     m.thighIn,     '"'],
+    ['Arm',       m.armIn,       '"'],
+    ['Neck',      m.neckIn,      '"'],
+    ['Inseam',    m.inseamIn,    '"'],
+  ].filter(([, v]) => v != null);
+
+  return (
+    <div style={modalBackdropStyle} onClick={onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 4 }}>
+          Scan • {new Date(entry.capturedAt).toLocaleDateString()}
+        </h2>
+        <p style={{ ...toolStyles.small, marginBottom: 12 }}>
+          Height {entry.heightIn}"{entry.weightLbs ? ` • ${entry.weightLbs} lbs` : ''}
+          {entry.poseConfidence != null && ` • pose confidence ${Math.round(entry.poseConfidence * 100)}%`}
+        </p>
+
+        {entry.silhouetteSvg && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}
+               dangerouslySetInnerHTML={{ __html: entry.silhouetteSvg }} />
+        )}
+
+        {rows.map(([label, value, unit]) => (
+          <div key={label} style={{ ...toolStyles.row, padding: '8px 0', borderBottom: '1px solid #F0EDE7' }}>
+            <span style={{ fontSize: 14, color: '#6B6B6B' }}>{label}</span>
+            <span style={{ fontSize: 15, fontWeight: 600, color: '#2C2C2C' }}>{value}{unit}</span>
+          </div>
+        ))}
+
+        {entry.bodyFatPctEstimate != null && (
+          <div style={{ ...toolStyles.banner('#4A6741'), marginTop: 14 }}>
+            <strong style={{ color: '#2C4220' }}>Body fat (Navy method estimate)</strong>
+            <p style={{ ...toolStyles.small, margin: '4px 0 0' }}>
+              <span style={{ fontSize: 22, fontWeight: 600, color: '#2C2C2C' }}>{entry.bodyFatPctEstimate}%</span>
+              {entry.leanMassLbsEstimate != null && ` • lean mass ≈ ${entry.leanMassLbsEstimate} lbs`}
+            </p>
+            <p style={{ ...toolStyles.small, margin: '6px 0 0', fontStyle: 'italic' }}>
+              Estimate based on neck / waist / hip and height. Not a clinical measurement.
+            </p>
+          </div>
+        )}
+
+        <p style={{ ...toolStyles.small, marginTop: 16, textAlign: 'center', color: '#9B9B9B' }}>
+          Photos stay on your device. Only measurements are saved.
+        </p>
+        <button style={{ ...toolStyles.btnPrimary, marginTop: 12 }} onClick={onClose}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function BodyScanCaptureModal({ onClose, onSaved }) {
+  const [stage, setStage] = useState('intro'); // intro | front | side | processing | review | saving
+  const [heightFt, setHeightFt] = useState('5');
+  const [heightIn, setHeightIn] = useState('6');
+  const [weightLbs, setWeightLbs] = useState('');
+  const [sex, setSex] = useState('female');
+  const [frontFile, setFrontFile] = useState(null);
+  const [sideFile, setSideFile] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const frontRef = useRef(null);
+  const sideRef = useRef(null);
+
+  const heightInches = (parseInt(heightFt) || 0) * 12 + (parseInt(heightIn) || 0);
+
+  const handleFront = (file) => {
+    if (!file) return;
+    setFrontFile(file); setStage('side');
+  };
+  const handleSide = async (file) => {
+    if (!file) return;
+    setSideFile(file); setStage('processing'); setError(null);
+    try {
+      const { runBodyScan } = await import('./bodyScan');
+      const r = await runBodyScan({
+        frontFile, sideFile: file, heightIn: heightInches,
+        weightLbs: weightLbs ? Number(weightLbs) : null, sex,
+      });
+      setResult(r); setStage('review');
+    } catch (e) {
+      setError(e.message); setStage('front');
+    }
+  };
+
+  const save = async () => {
+    setStage('saving'); setError(null);
+    try {
+      await healthApi.bodyScans.post({
+        heightIn: heightInches,
+        weightLbs: weightLbs ? Number(weightLbs) : null,
+        measurements: result.measurements,
+        bodyFatPctEstimate: result.bodyFatPctEstimate,
+        leanMassLbsEstimate: result.leanMassLbsEstimate,
+        silhouetteSvg: result.silhouetteSvg,
+        thumbnailFront: result.thumbnailFront,
+        thumbnailSide: result.thumbnailSide,
+        poseConfidence: result.poseConfidence,
+        capturedAt: new Date().toISOString(),
+      });
+      onSaved();
+    } catch (e) {
+      setError(e.message); setStage('review');
+    }
+  };
+
+  return (
+    <div style={modalBackdropStyle} onClick={stage === 'processing' || stage === 'saving' ? null : onClose}>
+      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 12 }}>
+          {stage === 'intro' && 'Set up scan'}
+          {stage === 'front' && '1 of 2 — Front photo'}
+          {stage === 'side' && '2 of 2 — Side photo'}
+          {stage === 'processing' && 'Processing scan…'}
+          {stage === 'review' && 'Review measurements'}
+          {stage === 'saving' && 'Saving…'}
+        </h2>
+
+        {stage === 'intro' && (
+          <>
+            <p style={toolStyles.label}>Your height</p>
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <input style={toolStyles.input} type="number" placeholder="ft" min="3" max="8"
+                     value={heightFt} onChange={(e) => setHeightFt(e.target.value)} />
+              <input style={toolStyles.input} type="number" placeholder="in" min="0" max="11"
+                     value={heightIn} onChange={(e) => setHeightIn(e.target.value)} />
+            </div>
+
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Current weight (lbs, optional — improves body fat estimate)</p>
+            <input style={toolStyles.input} type="number" inputMode="decimal" step="0.1"
+                   value={weightLbs} onChange={(e) => setWeightLbs(e.target.value)} />
+
+            <p style={{ ...toolStyles.label, marginTop: 14 }}>Sex (Navy body-fat formula)</p>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              {['female','male'].map(s => (
+                <button key={s} onClick={() => setSex(s)}
+                        style={{
+                          flex: 1,
+                          background: sex === s ? '#4A6741' : '#fff',
+                          color: sex === s ? '#fff' : '#2C2C2C',
+                          border: `1px solid ${sex === s ? '#4A6741' : '#E8E5DF'}`,
+                          borderRadius: 8, padding: '10px 6px', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                        }}>
+                  {s === 'female' ? 'Female' : 'Male'}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ ...toolStyles.banner('#C4956A'), marginTop: 14 }}>
+              <strong style={{ color: '#8B5E2F' }}>For best results:</strong>
+              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                <li>Wear fitted clothing (or just underwear)</li>
+                <li>Plain background, even lighting</li>
+                <li>Phone at hip height, ~6 ft away</li>
+                <li>Arms slightly out from body, feet shoulder-width apart</li>
+              </ul>
+            </div>
+
+            <button style={{ ...toolStyles.btnPrimary, marginTop: 14 }}
+                    onClick={() => setStage('front')}
+                    disabled={!heightInches || heightInches < 36}>
+              Start scan
+            </button>
+            <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+          </>
+        )}
+
+        {stage === 'front' && (
+          <>
+            <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+              Face the camera. Stand straight, arms slightly out from your body, feet shoulder-width apart.
+            </p>
+            <input ref={frontRef} type="file" accept="image/*" capture="environment"
+                   style={{ display: 'none' }}
+                   onChange={(e) => handleFront(e.target.files?.[0])} />
+            <button style={toolStyles.btnPrimary} onClick={() => frontRef.current?.click()}>📸 Take front photo</button>
+            {error && <p style={toolStyles.errorText}>{error}</p>}
+            <button style={toolStyles.btnSubtle} onClick={onClose}>Cancel</button>
+          </>
+        )}
+
+        {stage === 'side' && (
+          <>
+            <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+              Turn 90° to your side. Same spot, arms slightly forward of your body.
+            </p>
+            <input ref={sideRef} type="file" accept="image/*" capture="environment"
+                   style={{ display: 'none' }}
+                   onChange={(e) => handleSide(e.target.files?.[0])} />
+            <button style={toolStyles.btnPrimary} onClick={() => sideRef.current?.click()}>📸 Take side photo</button>
+            <button style={{ ...toolStyles.btnSubtle, marginTop: 8 }} onClick={() => { setFrontFile(null); setStage('front'); }}>
+              ← Retake front photo
+            </button>
+          </>
+        )}
+
+        {stage === 'processing' && (
+          <div style={{ padding: '40px 0', textAlign: 'center' }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>📐</div>
+            <p style={{ ...toolStyles.small, marginBottom: 4 }}>Loading pose model (first run downloads ~12 MB)…</p>
+            <p style={{ ...toolStyles.small }}>Running on-device measurements…</p>
+          </div>
+        )}
+
+        {stage === 'review' && result && (
+          <>
+            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: 14 }}>
+              {result.silhouetteSvg && (
+                <div style={{ flexShrink: 0, width: 100 }}
+                     dangerouslySetInnerHTML={{ __html: result.silhouetteSvg.replace('width="200"', 'width="100"').replace('height="400"', 'height="200"') }} />
+              )}
+              <div style={{ flex: 1 }}>
+                {[
+                  ['Shoulders', result.measurements.shouldersIn],
+                  ['Chest', result.measurements.chestIn],
+                  ['Waist', result.measurements.waistIn],
+                  ['Hips', result.measurements.hipsIn],
+                  ['Thigh', result.measurements.thighIn],
+                  ['Inseam', result.measurements.inseamIn],
+                ].filter(([, v]) => v != null).map(([l, v]) => (
+                  <div key={l} style={toolStyles.row}>
+                    <span style={{ fontSize: 13, color: '#6B6B6B' }}>{l}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>{v}"</span>
+                  </div>
+                ))}
+                {result.bodyFatPctEstimate != null && (
+                  <div style={{ ...toolStyles.row, marginTop: 8, paddingTop: 8, borderTop: '1px solid #F0EDE7' }}>
+                    <span style={{ fontSize: 13, color: '#6B6B6B' }}>Body fat (est.)</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: '#2C2C2C' }}>{result.bodyFatPctEstimate}%</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <p style={{ ...toolStyles.small, color: '#9B9B9B', fontStyle: 'italic', marginBottom: 12 }}>
+              Pose confidence {Math.round(result.poseConfidence * 100)}%. Measurements within ~½ inch tend to require a good plain background.
+            </p>
+
+            {error && <p style={toolStyles.errorText}>{error}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...toolStyles.btnSecondary, marginTop: 0, flex: 1 }} onClick={() => { setResult(null); setFrontFile(null); setSideFile(null); setStage('front'); }}>
+                Redo scan
+              </button>
+              <button style={{ ...toolStyles.btnPrimary, flex: 1 }} onClick={save}>Save scan</button>
+            </div>
+          </>
+        )}
+
+        {stage === 'saving' && (
+          <div style={{ padding: '40px 0', textAlign: 'center' }}>
+            <p style={toolStyles.small}>Saving your measurements…</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Hub card on Home ────────────────────────────────────────────────────────
+function HealthToolsSection({ onOpen }) {
+  const tools = [
+    { key: 'weight', label: 'Weight', icon: '⚖️' },
+    { key: 'bodyscan', label: 'Body scan', icon: '📐' },
+    { key: 'workout', label: 'Workouts', icon: '💪' },
+    { key: 'symptoms', label: 'Symptoms', icon: '🌡️' },
+    { key: 'photos', label: 'Photos', icon: '📸' },
+    { key: 'labs', label: 'Labs', icon: '🧪' },
+    { key: 'coach', label: 'AI coach', icon: '🤖' },
+  ];
+  return (
+    <section style={{ padding: '0 20px', marginTop: 20 }}>
+      <h3 style={{ fontSize: 16, fontWeight: 600, color: '#2C2C2C', margin: '0 0 10px', fontFamily: 'Fraunces, serif' }}>
+        Track Your Progress
+      </h3>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+        {tools.map(t => (
+          <button key={t.key}
+                  onClick={() => onOpen(t.key)}
+                  style={{
+                    background: '#fff', border: '1px solid #E8E5DF', borderRadius: 12,
+                    padding: '12px 6px', cursor: 'pointer', textAlign: 'center',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+                  }}>
+            <div style={{ fontSize: 22 }}>{t.icon}</div>
+            <div style={{ fontSize: 10, color: '#6B6B6B', marginTop: 4, fontWeight: 500 }}>{t.label}</div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
