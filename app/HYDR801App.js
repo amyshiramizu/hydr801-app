@@ -6331,7 +6331,7 @@ function FitnessScreen({ user, setUser }) {
     );
   }
 
-  return <FitnessHomeScreen user={user} />;
+  return <FitnessHomeScreen user={user} onStartWorkout={() => setShowWorkoutPlayer(true)} />;
 }
 
 // AI Fitness Assessment Component
@@ -7185,7 +7185,7 @@ function AIFitnessAssessment({ onComplete, onCancel }) {
 }
 
 // Fitness Home Screen (after assessment)
-function FitnessHomeScreen({ user }) {
+function FitnessHomeScreen({ user, onStartWorkout }) {
   const plan = user.workoutPlan;
   const todayWorkout = plan?.weeklyPlan?.workouts?.[0] || {
     name: 'Gentle Strength',
@@ -7245,9 +7245,9 @@ function FitnessHomeScreen({ user }) {
           <span style={styles.todayTag}>{user.fitnessLevel || 'Beginner'}</span>
           <span style={styles.todayTag}>{todayWorkout.type}</span>
         </div>
-        <button 
+        <button
           style={styles.primaryButtonWhite}
-          onClick={() => setShowWorkoutPlayer(true)}
+          onClick={onStartWorkout}
         >
           Start Workout
         </button>
