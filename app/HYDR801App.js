@@ -308,6 +308,24 @@ const authApi = {
       method: 'POST', headers: { 'Authorization': `Bearer ${token}` },
     }).catch(() => {});
   },
+  requestLoginCode: async (identifier) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth-link?action=request`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not send a code.');
+    return data;
+  },
+  verifyLoginCode: async (identifier, code) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth-link?action=verify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, code }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not verify the code.');
+    return data;
+  },
 };
 
 // Patient-side calls for the five new health-tools endpoints. Every call
@@ -370,6 +388,82 @@ const healthApi = {
       healthApi._call('/api/patient-app-push', { method: 'DELETE', body: JSON.stringify({ endpoint }) }),
   },
 };
+
+// ── Offline write queue ───────────────────────────────────────────────────
+// Wraps healthApi writes so a patient logging a weight on the subway gets
+// the entry persisted locally and POSTed to the server the moment the
+// browser comes back online. localStorage is fine at this scale — entries
+// are tiny JSON.
+const OFFLINE_QUEUE_KEY = 'hydr801.offlineQueue.v1';
+
+function loadOfflineQueue() {
+  if (typeof window === 'undefined') return [];
+  try { return JSON.parse(window.localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveOfflineQueue(items) {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(items)); } catch {}
+}
+
+const offlineQueue = {
+  size: () => loadOfflineQueue().length,
+  add: (path, opts) => {
+    const items = loadOfflineQueue();
+    items.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      path, opts, queuedAt: new Date().toISOString(),
+    });
+    saveOfflineQueue(items);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hydr801:queueChanged', { detail: { size: items.length } }));
+    }
+  },
+  flush: async () => {
+    const items = loadOfflineQueue();
+    if (items.length === 0) return { sent: 0, failed: 0 };
+    const remaining = [];
+    let sent = 0, failed = 0;
+    for (const item of items) {
+      try {
+        await healthApi._call(item.path, item.opts);
+        sent += 1;
+      } catch (e) {
+        // Treat network errors as "still offline" and keep in queue.
+        // Anything 4xx (validation) we drop — re-queueing won't fix it.
+        const msg = String(e?.message || '');
+        const isTransient = /Failed to fetch|NetworkError|timeout|503|504/i.test(msg);
+        if (isTransient) remaining.push(item); else failed += 1;
+      }
+    }
+    saveOfflineQueue(remaining);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hydr801:queueChanged', { detail: { size: remaining.length } }));
+    }
+    return { sent, failed, stillQueued: remaining.length };
+  },
+};
+
+// Wrap a write so it queues on a network failure. Endpoints we care about
+// (weights, symptoms, workouts) are already idempotent server-side on
+// (user_id, recordedAt) so a retry can't double-log.
+function offlineSafeWrite(path, opts) {
+  return healthApi._call(path, opts).catch((e) => {
+    const msg = String(e?.message || '');
+    const offline = (typeof navigator !== 'undefined' && !navigator.onLine)
+      || /Failed to fetch|NetworkError/i.test(msg);
+    if (offline) {
+      offlineQueue.add(path, opts);
+      return { queued: true, offline: true };
+    }
+    throw e;
+  });
+}
+
+// Patch the post() methods for endpoints that benefit from offline retry.
+healthApi.weights.post   = (entry) => offlineSafeWrite('/api/patient-weights',  { method: 'POST', body: JSON.stringify(entry) });
+healthApi.symptoms.post  = (entry) => offlineSafeWrite('/api/patient-symptoms', { method: 'POST', body: JSON.stringify(entry) });
+healthApi.workouts.post  = (entry) => offlineSafeWrite('/api/patient-workouts', { method: 'POST', body: JSON.stringify(entry) });
 
 // Convert a base64url VAPID public key string into the Uint8Array that
 // PushManager.subscribe wants.
@@ -748,6 +842,17 @@ export default function HYDR801App() {
     setAppMode('patient');
   };
 
+  // Drain the offline write queue whenever we have a token and the device
+  // says it's online. Also re-tries on every 'online' event after a
+  // network blip.
+  useEffect(() => {
+    if (!authToken) return;
+    const flush = () => { if (navigator.onLine) offlineQueue.flush().catch(() => {}); };
+    flush();
+    window.addEventListener('online', flush);
+    return () => window.removeEventListener('online', flush);
+  }, [authToken]);
+
   // Still checking session / loading saved state — render a quick splash so
   // the welcome onboarding doesn't flash before we know who the user is.
   if (!authChecked) {
@@ -852,6 +957,7 @@ export default function HYDR801App() {
       {activeModal && (
         <Modal activeModal={activeModal} setActiveModal={setActiveModal} />
       )}
+      <OfflineQueueChip />
     </div>
   );
 }
@@ -977,17 +1083,23 @@ const globalStyles = `
 // Sign-in / sign-up gate. Renders before onboarding so the patient is bound
 // to a real account before they start logging anything.
 function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
-  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  // 'link' = passwordless (default). 'login'/'signup' = legacy password path.
+  const [mode, setMode] = useState('link');
+  // Magic-link flow state
+  const [identifier, setIdentifier] = useState('');
+  const [channel, setChannel] = useState(null);   // 'email' | 'phone' once code sent
+  const [code, setCode] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  // Legacy password fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(initialError || null);
 
-  const submit = async (e) => {
+  const submitPassword = async (e) => {
     e?.preventDefault?.();
-    setError(null);
-    setBusy(true);
+    setError(null); setBusy(true);
     try {
       const data = mode === 'signup'
         ? await authApi.signup(email.trim(), password, name.trim())
@@ -995,9 +1107,34 @@ function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
       await onSuccess(data);
     } catch (err) {
       setError(err.message || 'Something went wrong');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
+  };
+
+  const requestCode = async (e) => {
+    e?.preventDefault?.();
+    setError(null); setBusy(true);
+    try {
+      const r = await authApi.requestLoginCode(identifier.trim());
+      setChannel(r.channel);
+      setCodeSent(true);
+    } catch (err) {
+      setError(err.message || 'Could not send a code.');
+    } finally { setBusy(false); }
+  };
+
+  const verifyCode = async (e) => {
+    e?.preventDefault?.();
+    setError(null); setBusy(true);
+    try {
+      const data = await authApi.verifyLoginCode(identifier.trim(), code.trim());
+      await onSuccess(data);
+    } catch (err) {
+      setError(err.message || 'Could not verify the code.');
+    } finally { setBusy(false); }
+  };
+
+  const resetLinkFlow = () => {
+    setCodeSent(false); setCode(''); setChannel(null); setError(null);
   };
 
   return (
@@ -1009,60 +1146,116 @@ function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
       </div>
 
       <div style={{background:'#fff',borderRadius:16,padding:20,boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-        <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
-          <button
-            onClick={() => { setMode('login'); setError(null); }}
-            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
-          >Sign in</button>
-          <button
-            onClick={() => { setMode('signup'); setError(null); }}
-            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
-          >Create account</button>
-        </div>
-
-        <form onSubmit={submit}>
-          {mode === 'signup' && (
-            <div style={{marginBottom:12}}>
-              <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
-              <input
-                type="text" value={name} onChange={(e) => setName(e.target.value)}
-                placeholder="Your name" autoComplete="name"
-                style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-              />
+        {mode === 'link' ? (
+          codeSent ? (
+            <form onSubmit={verifyCode}>
+              <p style={{fontSize:13,color:'#2B2B2B',marginBottom:14}}>
+                We sent a 6-digit code to your {channel === 'email' ? 'email' : 'phone'}. Enter it below.
+              </p>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Code</label>
+                <input
+                  type="text" inputMode="numeric" pattern="\d{6}" maxLength={6}
+                  value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                  placeholder="123456" autoComplete="one-time-code" required autoFocus
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:20,letterSpacing:6,textAlign:'center',background:'#FAFAF8',color:'#2B2B2B',fontFamily:'monospace'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || code.length !== 6}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || code.length !== 6) ? 0.7 : 1}}
+              >{busy ? 'Verifying…' : 'Sign in'}</button>
+              <button
+                type="button" onClick={resetLinkFlow}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'1px solid #EAE8E4',borderRadius:10,fontSize:13,cursor:'pointer'}}
+              >← Use a different email or phone</button>
+            </form>
+          ) : (
+            <form onSubmit={requestCode}>
+              <p style={{fontSize:13,color:'#2B2B2B',marginBottom:14}}>
+                Sign in with a one-time code — no password needed.
+              </p>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email or phone</label>
+                <input
+                  type="text" value={identifier} onChange={(e) => setIdentifier(e.target.value)}
+                  placeholder="you@example.com or (555) 123-4567"
+                  autoComplete="email" required autoFocus
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || !identifier.trim()}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !identifier.trim()) ? 0.7 : 1}}
+              >{busy ? 'Sending…' : 'Send me a code'}</button>
+              <button
+                type="button" onClick={() => { setMode('login'); setError(null); }}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'none',fontSize:12,cursor:'pointer',textDecoration:'underline'}}
+              >Use a password instead</button>
+            </form>
+          )
+        ) : (
+          <>
+            <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
+              <button
+                onClick={() => { setMode('login'); setError(null); }}
+                style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
+              >Sign in</button>
+              <button
+                onClick={() => { setMode('signup'); setError(null); }}
+                style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
+              >Create account</button>
             </div>
-          )}
-          <div style={{marginBottom:12}}>
-            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
-            <input
-              type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com" autoComplete="email" required
-              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-            />
-          </div>
-          <div style={{marginBottom:14}}>
-            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
-            <input
-              type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-              placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
-              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-              minLength={mode === 'signup' ? 8 : undefined} required
-              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-            />
-          </div>
 
-          {error && (
-            <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
-            style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
-          >
-            {busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}
-          </button>
-        </form>
+            <form onSubmit={submitPassword}>
+              {mode === 'signup' && (
+                <div style={{marginBottom:12}}>
+                  <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
+                  <input
+                    type="text" value={name} onChange={(e) => setName(e.target.value)}
+                    placeholder="Your name" autoComplete="name"
+                    style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                  />
+                </div>
+              )}
+              <div style={{marginBottom:12}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
+                <input
+                  type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com" autoComplete="email" required
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
+                <input
+                  type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                  placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  minLength={mode === 'signup' ? 8 : undefined} required
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
+              >{busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}</button>
+              <button
+                type="button" onClick={() => { setMode('link'); setError(null); }}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'none',fontSize:12,cursor:'pointer',textDecoration:'underline'}}
+              >← Use a one-time code instead</button>
+            </form>
+          </>
+        )}
 
         {onSkipAsDemo && (
           <button
@@ -2022,6 +2215,43 @@ function NotificationsCta() {
         >Not now</button>
       </div>
       {error && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#C24A4A' }}>{error}</p>}
+    </div>
+  );
+}
+
+// Tiny bottom-center toast that shows up only when there are unsent writes
+// in the offline queue. Subscribes to the same custom event the queue
+// dispatches so flips happen instantly.
+function OfflineQueueChip() {
+  const [count, setCount] = useState(() => (typeof window === 'undefined' ? 0 : offlineQueue.size()));
+  const [online, setOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onQueue = (e) => setCount(e.detail?.size ?? offlineQueue.size());
+    const onUp = () => setOnline(true);
+    const onDown = () => setOnline(false);
+    window.addEventListener('hydr801:queueChanged', onQueue);
+    window.addEventListener('online', onUp);
+    window.addEventListener('offline', onDown);
+    return () => {
+      window.removeEventListener('hydr801:queueChanged', onQueue);
+      window.removeEventListener('online', onUp);
+      window.removeEventListener('offline', onDown);
+    };
+  }, []);
+  if (count === 0 && online) return null;
+  return (
+    <div style={{
+      position: 'fixed', left: '50%', transform: 'translateX(-50%)',
+      bottom: 84, zIndex: 1500,
+      background: online ? 'rgba(74, 103, 65, 0.95)' : 'rgba(155, 59, 28, 0.95)',
+      color: '#fff', padding: '8px 14px', borderRadius: 999,
+      fontSize: 12, fontWeight: 600,
+      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+    }}>
+      {online
+        ? `⏳ ${count} ${count === 1 ? 'entry' : 'entries'} syncing…`
+        : `📴 Offline — ${count || 'changes'} will sync when you reconnect`}
     </div>
   );
 }
@@ -10586,6 +10816,135 @@ function FoodLogScreen({ user, setUser, onBack }) {
   );
 }
 
+// Open Food Facts is a free public UPC database (no key needed). Returns
+// { name, servingLabel, calories, protein, carbs, fat } or throws.
+async function lookupBarcodeFood(upc) {
+  const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(upc)}.json?fields=product_name,brands,serving_size,nutriments,quantity`);
+  if (!r.ok) throw new Error(`Lookup failed (${r.status})`);
+  const data = await r.json();
+  if (data.status !== 1 || !data.product) {
+    throw new Error('No product found for that barcode.');
+  }
+  const p = data.product;
+  const n = p.nutriments || {};
+  // Open Food Facts nutriments are usually per-100g; pull serving-size
+  // values directly when present.
+  const calPer100 = Number(n['energy-kcal_100g']) || Number(n['energy-kcal']) || 0;
+  const proPer100 = Number(n['proteins_100g']) || Number(n.proteins) || 0;
+  const carbPer100 = Number(n['carbohydrates_100g']) || Number(n.carbohydrates) || 0;
+  const fatPer100 = Number(n['fat_100g']) || Number(n.fat) || 0;
+  const servingSize = p.serving_size || p.quantity || '100 g';
+  // Try to derive a per-serving multiplier from "30 g" / "1 cup (240 ml)".
+  const gMatch = String(servingSize).match(/(\d+(?:\.\d+)?)\s*g\b/i);
+  const factor = gMatch ? Number(gMatch[1]) / 100 : 1;
+  const name = [p.product_name, p.brands ? `(${p.brands.split(',')[0]})` : null].filter(Boolean).join(' ');
+  return {
+    name: name || `UPC ${upc}`,
+    servingLabel: servingSize,
+    calories: Math.max(0, Math.round(calPer100 * factor)),
+    protein:  Math.max(0, Math.round(proPer100 * factor * 10) / 10),
+    carbs:    Math.max(0, Math.round(carbPer100 * factor * 10) / 10),
+    fat:      Math.max(0, Math.round(fatPer100 * factor * 10) / 10),
+  };
+}
+
+// Live-camera barcode scanner using the browser's native BarcodeDetector.
+// No JS lib dep. Bails out with a clear message on browsers that don't
+// support it (older iOS Safari mostly).
+function BarcodeScanModal({ onClose, onScanned }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const [error, setError] = useState(null);
+  const [status, setStatus] = useState('Point at the barcode');
+
+  useEffect(() => {
+    let cancelled = false;
+    if (typeof window === 'undefined') return;
+
+    if (!('BarcodeDetector' in window)) {
+      setError("Your browser doesn't support barcode scanning. Try the latest Chrome or update to iOS 17+.");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Camera access isn't available on this browser.");
+      return;
+    }
+
+    const supported = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'];
+    const detector = new window.BarcodeDetector({ formats: supported });
+
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }, audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        const video = videoRef.current;
+        if (!video) return;
+        video.srcObject = stream;
+        await video.play();
+
+        const tick = async () => {
+          if (cancelled) return;
+          try {
+            const codes = await detector.detect(video);
+            const hit = codes.find(c => c.rawValue && /^\d{8,14}$/.test(c.rawValue));
+            if (hit) {
+              setStatus(`Found ${hit.rawValue}`);
+              onScanned(hit.rawValue);
+              return;
+            }
+          } catch { /* keep scanning */ }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch (e) {
+        setError(e.message || 'Could not access the camera.');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, [onScanned]);
+
+  return (
+    <div style={styles.foodModalBackdrop} onClick={onClose}>
+      <div style={{ ...styles.foodModal, padding: 0, overflow: 'hidden' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.foodModalHeader}>
+          <h2 style={styles.foodModalTitle}>📷 Scan barcode</h2>
+          <button style={styles.foodModalClose} onClick={onClose}>×</button>
+        </div>
+        <div style={{ background: '#000', position: 'relative', minHeight: 260 }}>
+          {error ? (
+            <p style={{ color: '#fff', padding: 24, textAlign: 'center', fontSize: 13 }}>{error}</p>
+          ) : (
+            <>
+              <video ref={videoRef} playsInline muted style={{ width: '100%', display: 'block' }} />
+              <div style={{
+                position: 'absolute', inset: 0, display: 'flex',
+                alignItems: 'center', justifyContent: 'center', pointerEvents: 'none',
+              }}>
+                <div style={{
+                  width: '70%', maxWidth: 260, height: 80,
+                  border: '2px solid rgba(74, 103, 65, 0.9)', borderRadius: 8,
+                }} />
+              </div>
+            </>
+          )}
+        </div>
+        <p style={{ textAlign: 'center', fontSize: 12, color: '#666', padding: '12px 16px' }}>
+          {error ? '' : status}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function AddFoodModal({ meal, onClose, onAdd }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -10594,10 +10953,27 @@ function AddFoodModal({ meal, onClose, onAdd }) {
   const [selected, setSelected] = useState(null);
   const [servings, setServings] = useState('1');
   const [showCustom, setShowCustom] = useState(false);
+  const [showBarcodeScan, setShowBarcodeScan] = useState(false);
+  const [barcodeLookup, setBarcodeLookup] = useState(false);
   const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
   const [recents, setRecents] = useState([]);
   useEffect(() => { setRecents(loadRecentFoods()); }, []);
   const searchTimeoutRef = useRef(null);
+
+  const handleBarcode = async (upc) => {
+    setShowBarcodeScan(false);
+    setBarcodeLookup(true);
+    setError(null);
+    try {
+      const food = await lookupBarcodeFood(upc);
+      setSelected(food);
+      setServings('1');
+    } catch (e) {
+      setError(e.message || 'Could not look up that barcode.');
+    } finally {
+      setBarcodeLookup(false);
+    }
+  };
 
   useEffect(() => {
     if (!query.trim()) {
@@ -10783,8 +11159,19 @@ function AddFoodModal({ meal, onClose, onAdd }) {
                 <p style={styles.foodModalHint}>No matches found.</p>
               )}
             </div>
-            <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...styles.secondaryButton, flex: 1 }} onClick={() => setShowBarcodeScan(true)} disabled={barcodeLookup}>
+                {barcodeLookup ? 'Looking up…' : '📷 Scan barcode'}
+              </button>
+              <button style={{ ...styles.secondaryButton, flex: 1 }} onClick={() => setShowCustom(true)}>+ Add custom</button>
+            </div>
           </div>
+        )}
+        {showBarcodeScan && (
+          <BarcodeScanModal
+            onClose={() => setShowBarcodeScan(false)}
+            onScanned={handleBarcode}
+          />
         )}
       </div>
     </div>
