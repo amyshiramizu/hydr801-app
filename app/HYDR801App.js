@@ -19644,7 +19644,25 @@ function WorkoutLogScreen({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showLog, setShowLog] = useState(null);          // null | { prefill }
-  const [showImport, setShowImport] = useState(false);
+  const [importStage, setImportStage] = useState(null);  // null | 'scanning' | 'error'
+  const [importError, setImportError] = useState(null);
+  const [importWarnings, setImportWarnings] = useState([]);
+  const importFileRef = useRef(null);
+
+  const handleImportFile = async (file) => {
+    if (!file) return;
+    setImportStage('scanning'); setImportError(null); setImportWarnings([]);
+    try {
+      const { base64, mimeType } = await compressImageForVision(file);
+      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
+      setImportStage(null);
+      setShowLog({ prefill: parsed });
+    } catch (e) {
+      setImportError(e.message);
+      if (Array.isArray(e.warnings)) setImportWarnings(e.warnings);
+      setImportStage('error');
+    }
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -19675,8 +19693,17 @@ function WorkoutLogScreen({ onBack }) {
       </div>
 
       <button style={toolStyles.btnPrimary} onClick={() => setShowLog({})}>+ Log workout</button>
-      <button style={toolStyles.btnSecondary} onClick={() => setShowImport(true)}>
-        📲 Import from Apple Health / Strava
+      <input
+        ref={importFileRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; handleImportFile(f); }}
+      />
+      {/* iOS Safari only allows programmatic file-input clicks inside a user-
+          gesture handler — keep the .click() call synchronous in onClick. */}
+      <button style={toolStyles.btnSecondary} onClick={() => importFileRef.current?.click()}>
+        📲 Import from Apple Health / Google Fit / Strava
       </button>
 
       <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
@@ -19720,11 +19747,37 @@ function WorkoutLogScreen({ onBack }) {
           onSaved={() => { setShowLog(null); refresh(); }}
         />
       )}
-      {showImport && (
-        <WorkoutImportModal
-          onClose={() => setShowImport(false)}
-          onParsed={(parsed) => { setShowImport(false); setShowLog({ prefill: parsed }); }}
-        />
+      {importStage && (
+        <div style={modalBackdropStyle} onClick={() => setImportStage(null)}>
+          <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
+            {importStage === 'scanning' && (
+              <>
+                <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+                  Reading your screenshot — type, duration, calories, distance, and heart rate.
+                </p>
+                <button style={toolStyles.btnPrimary} disabled>🔍 Reading screenshot…</button>
+              </>
+            )}
+            {importStage === 'error' && (
+              <>
+                <div style={{ ...toolStyles.banner('#C24A4A'), marginBottom: 12 }}>
+                  <strong style={{ color: '#C24A4A' }}>{importError}</strong>
+                  {importWarnings.length > 0 && (
+                    <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                      {importWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                    </ul>
+                  )}
+                </div>
+                <button
+                  style={toolStyles.btnPrimary}
+                  onClick={() => { setImportStage(null); importFileRef.current?.click(); }}
+                >📷 Try a different screenshot</button>
+              </>
+            )}
+            <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={() => setImportStage(null)}>Cancel</button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -19846,59 +19899,6 @@ function WorkoutLogModal({ onClose, onSaved, prefill }) {
   );
 }
 
-function WorkoutImportModal({ onClose, onParsed }) {
-  const [stage, setStage] = useState('idle'); // idle | scanning | error
-  const [error, setError] = useState(null);
-  const [warnings, setWarnings] = useState([]);
-  const fileRef = useRef(null);
-
-  const handle = async (file) => {
-    if (!file) return;
-    setStage('scanning'); setError(null); setWarnings([]);
-    try {
-      const base64 = await fileToBase64(file);
-      const mimeType = file.type || 'image/jpeg';
-      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
-      onParsed(parsed);
-    } catch (e) {
-      setError(e.message);
-      if (Array.isArray(e.warnings)) setWarnings(e.warnings);
-      setStage('error');
-    }
-  };
-
-  return (
-    <div style={modalBackdropStyle} onClick={onClose}>
-      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
-        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
-        <p style={{ ...toolStyles.small, marginBottom: 14 }}>
-          On iPhone, open the Health or Fitness app → tap a workout → screenshot the summary, then pick it here.
-          We'll parse type, duration, calories, distance, and heart rate automatically.
-        </p>
-
-        <input ref={fileRef} type="file" accept="image/*"
-               style={{ display: 'none' }}
-               onChange={(e) => handle(e.target.files?.[0])} />
-        <button style={toolStyles.btnPrimary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
-          {stage === 'scanning' ? '🔍 Reading screenshot…' : '📷 Pick screenshot from gallery'}
-        </button>
-
-        {error && (
-          <div style={{ ...toolStyles.banner('#C24A4A'), marginTop: 14 }}>
-            <strong style={{ color: '#C24A4A' }}>{error}</strong>
-            {warnings.length > 0 && (
-              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
-                {warnings.map((w, i) => <li key={i}>{w}</li>)}
-              </ul>
-            )}
-          </div>
-        )}
-
-        <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={onClose}>Cancel</button>
-      </div>
-    </div>
-  );
-}
 
 // Shared modal styles + file→base64 helper used by all the modals below.
 const modalBackdropStyle = {
