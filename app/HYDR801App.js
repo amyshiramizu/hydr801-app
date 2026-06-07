@@ -360,7 +360,60 @@ const healthApi = {
     post: (entry) => healthApi._call('/api/patient-body-scans', { method: 'POST', body: JSON.stringify(entry) }),
     delete: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
   },
+  push: {
+    config: () => healthApi._call('/api/patient-app-push'),
+    subscribe: (subscription, prefs) =>
+      healthApi._call('/api/patient-app-push', { method: 'POST', body: JSON.stringify({ subscription, prefs }) }),
+    updatePrefs: (endpoint, prefs) =>
+      healthApi._call('/api/patient-app-push', { method: 'PATCH', body: JSON.stringify({ endpoint, prefs }) }),
+    unsubscribe: (endpoint) =>
+      healthApi._call('/api/patient-app-push', { method: 'DELETE', body: JSON.stringify({ endpoint }) }),
+  },
 };
+
+// Convert a base64url VAPID public key string into the Uint8Array that
+// PushManager.subscribe wants.
+function vapidKeyToUint8(base64UrlString) {
+  const padding = '='.repeat((4 - base64UrlString.length % 4) % 4);
+  const base64 = (base64UrlString + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+// Subscribe this device to push notifications. Returns the saved
+// subscription on success, or throws with a human-readable reason — the
+// caller is expected to surface that in the UI.
+async function enablePushNotifications() {
+  if (typeof window === 'undefined') throw new Error('not in browser');
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    throw new Error('Your browser doesn\'t support push notifications.');
+  }
+  // iOS 16.4+ only delivers push to PWAs added to the home screen.
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  if (isIOS && !isStandalone) {
+    throw new Error('On iPhone, add HYDR801 to your Home Screen first (Share → Add to Home Screen), then open it from there and try again.');
+  }
+
+  const reg = await navigator.serviceWorker.ready;
+  const cfg = await healthApi.push.config();
+  if (!cfg?.publicKey) throw new Error('Push isn\'t configured on the server yet. Tell support.');
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Permission denied — you can enable it later from your phone settings.');
+
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: vapidKeyToUint8(cfg.publicKey),
+    });
+  }
+  await healthApi.push.subscribe(sub.toJSON());
+  return sub.toJSON();
+}
 
 // Default state for a brand-new patient (used when their saved state is empty).
 // Mirrors the mock state HYDR801App used to start with.
@@ -1823,6 +1876,156 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
   );
 }
 
+// Inline banner that appears when the patient lands on Home via the
+// "Refill your medication" push notification (?refill=1). Confirms with one
+// tap and pings the existing weno-proxy endpoint to kick off the refill.
+function RefillBanner() {
+  const [visible, setVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('refill') === '1') {
+      setVisible(true);
+      params.delete('refill');
+      const next = window.location.pathname + (params.toString() ? `?${params}` : '');
+      window.history.replaceState({}, '', next);
+    }
+  }, []);
+
+  if (!visible) return null;
+
+  const requestRefill = async () => {
+    setBusy(true); setError(null);
+    try {
+      const token = authApi.loadToken();
+      const r = await fetch(`${PROVIDER_API_BASE}/api/weno-proxy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ action: 'request-refill', source: 'patient-app' }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `server returned ${r.status}`);
+      setDone(true);
+    } catch (e) {
+      setError(e.message || 'Could not send refill request.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: '#FFF4E5', border: '1px solid #E0A05A', borderRadius: 12,
+      padding: '14px 16px', marginBottom: 16,
+    }}>
+      <strong style={{ color: '#8A4B00', fontSize: 14 }}>💊 Time to refill your medication</strong>
+      {done ? (
+        <p style={{ margin: '6px 0 0', fontSize: 13, color: '#3A6B2A' }}>
+          ✅ Refill request sent. Your clinic will process it shortly.
+        </p>
+      ) : (
+        <>
+          <p style={{ margin: '6px 0 10px', fontSize: 13, color: '#5B3A12' }}>
+            You're running low. Want us to start a refill with your clinic?
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={requestRefill}
+              disabled={busy}
+              style={{
+                flex: 1, background: '#4A6741', color: '#fff', border: 'none',
+                borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+              }}
+            >{busy ? 'Sending…' : 'Request refill'}</button>
+            <button
+              onClick={() => setVisible(false)}
+              style={{
+                background: 'transparent', color: '#5B3A12', border: '1px solid #E0A05A',
+                borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+              }}
+            >Not now</button>
+          </div>
+          {error && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#C24A4A' }}>{error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// One-shot card on Home asking the patient to turn on reminders. Dismisses
+// to localStorage so we don't nag every open. Only renders if push isn't
+// already enabled, the browser supports it, and the patient hasn't said no.
+function NotificationsCta() {
+  const [hidden, setHidden] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('Notification' in window) || !('serviceWorker' in navigator)) return;
+    if (localStorage.getItem('hydr801.notifCta.dismissed') === '1') return;
+    if (Notification.permission === 'granted') return;
+    if (Notification.permission === 'denied') return; // they already said no — don't ask again
+    setHidden(false);
+  }, []);
+
+  if (hidden) return null;
+
+  const enable = async () => {
+    setBusy(true); setError(null);
+    try {
+      await enablePushNotifications();
+      localStorage.setItem('hydr801.notifCta.dismissed', '1');
+      setHidden(true);
+    } catch (e) {
+      setError(e.message || 'Could not enable notifications.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismiss = () => {
+    localStorage.setItem('hydr801.notifCta.dismissed', '1');
+    setHidden(true);
+  };
+
+  return (
+    <div style={{
+      background: '#F1F7EE', border: '1px solid #4A6741', borderRadius: 12,
+      padding: '14px 16px', marginBottom: 16,
+    }}>
+      <strong style={{ color: '#2C4220', fontSize: 14 }}>🔔 Turn on reminders</strong>
+      <p style={{ margin: '6px 0 10px', fontSize: 13, color: '#3A5A30' }}>
+        Stay on track with injection, weigh-in, and refill nudges. You can change preferences later.
+      </p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={enable}
+          disabled={busy}
+          style={{
+            flex: 1, background: '#4A6741', color: '#fff', border: 'none',
+            borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+          }}
+        >{busy ? 'Enabling…' : 'Turn on'}</button>
+        <button
+          onClick={dismiss}
+          style={{
+            background: 'transparent', color: '#3A5A30', border: '1px solid #4A6741',
+            borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+          }}
+        >Not now</button>
+      </div>
+      {error && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#C24A4A' }}>{error}</p>}
+    </div>
+  );
+}
+
 // Home Screen
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
@@ -1934,6 +2137,15 @@ function HomeScreen({ user, setUser, setActiveModal }) {
           <span style={styles.weekNumber}>{user.week}</span>
         </div>
       </header>
+
+      {/* Refill nudge — deep-linked from a tapped refill push notification */}
+      <RefillBanner />
+
+      {/* One-shot CTA to enable push — appears after the patient has done
+          at least one action so we're not asking on the cold-open screen. */}
+      {(user.currentStreak > 0 || (user.totalPoints || 0) > 0) && (
+        <NotificationsCta />
+      )}
 
       {/* Calendar with Injection Tracking - TOP */}
       <HomeCalendar user={user} setUser={setUser} />

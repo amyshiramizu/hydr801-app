@@ -1,77 +1,84 @@
-const CACHE_NAME = 'hydr801-v1';
+const CACHE_NAME = 'hydr801-v2';
 const urlsToCache = [
   '/',
   '/manifest.json',
 ];
 
-// Install event
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache))
   );
   self.skipWaiting();
 });
 
-// Fetch event - Network first, fallback to cache
+// Network-first with cache fallback — keeps the app working offline once
+// it's been opened at least once.
 self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Clone the response
         const responseClone = response.clone();
-        
-        // Open cache and store the new response
-        caches.open(CACHE_NAME)
-          .then((cache) => {
-            if (event.request.method === 'GET') {
-              cache.put(event.request, responseClone);
-            }
-          });
-        
+        caches.open(CACHE_NAME).then((cache) => {
+          cache.put(event.request, responseClone).catch(() => {});
+        });
         return response;
       })
-      .catch(() => {
-        // If network fails, try cache
-        return caches.match(event.request);
-      })
+      .catch(() => caches.match(event.request))
   );
 });
 
-// Activate event - Clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
+    caches.keys().then((cacheNames) =>
+      Promise.all(
+        cacheNames.map((name) => (name !== CACHE_NAME ? caches.delete(name) : null))
+      )
+    )
   );
   self.clients.claim();
 });
 
-// Push notification support (for future use)
+// Push notification handler. Payloads sent by lib/web-push are JSON with
+// shape { title, body, url?, category?, tag?, icon? }. Fall back to a
+// generic notification if the payload is missing or unparseable.
 self.addEventListener('push', (event) => {
+  let payload = {};
+  if (event.data) {
+    try { payload = event.data.json(); }
+    catch { payload = { title: 'HYDR801', body: event.data.text() }; }
+  }
+  const title = payload.title || 'HYDR801 Wellness';
   const options = {
-    body: event.data ? event.data.text() : 'New notification from HYDR801',
-    icon: '/icon-192.png',
+    body: payload.body || '',
+    icon: payload.icon || '/icon-192.png',
     badge: '/icon-192.png',
     vibrate: [100, 50, 100],
+    tag: payload.tag || payload.category || undefined,
+    renotify: !!payload.tag,
     data: {
-      dateOfArrival: Date.now(),
-      primaryKey: 1
-    }
+      url: payload.url || '/',
+      category: payload.category || null,
+      arrivedAt: Date.now(),
+    },
   };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
 
-  event.waitUntil(
-    self.registration.showNotification('HYDR801 Wellness', options)
-  );
+// Tap on a notification → focus an existing tab or open a new one, deep-
+// linking to the URL we attached at push time.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || '/';
+  event.waitUntil((async () => {
+    const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of allClients) {
+      try {
+        await client.focus();
+        if ('navigate' in client) await client.navigate(targetUrl);
+        return;
+      } catch {}
+    }
+    await self.clients.openWindow(targetUrl);
+  })());
 });
