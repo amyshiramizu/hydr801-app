@@ -48,6 +48,8 @@ function useProviderActivitySync(user) {
       proteinGoal: user.proteinGoal,
       fiberCurrent: user.fiberCurrent,
       fiberGoal: user.fiberGoal,
+      sugarCurrent: user.sugarCurrent,
+      sugarLimit: user.sugarLimit,
       exerciseCurrent: user.exerciseCurrent,
       exerciseGoal: user.exerciseGoal,
       medicationDose: user.medicationDose,
@@ -246,6 +248,7 @@ const pushRecentFood = (food) => {
     carbs: food.carbs,
     fat: food.fat,
     fiber: food.fiber || 0,
+    sugar: food.sugar || 0,
   }, ...filtered]);
 };
 
@@ -534,6 +537,7 @@ function defaultPatientState(profile) {
     waterGoal: 80, waterCurrent: 0,
     proteinGoal: 120, proteinCurrent: 0,
     fiberGoal: 25, fiberCurrent: 0,
+    sugarLimit: 25, sugarCurrent: 0,
     exerciseGoal: 30, exerciseCurrent: 0,
     weeklyHistory: [],
     providerNotes: [],
@@ -619,6 +623,8 @@ export default function HYDR801App() {
     proteinCurrent: 65,
     fiberGoal: 25,
     fiberCurrent: 12,
+    sugarLimit: 25,
+    sugarCurrent: 8,
     exerciseGoal: 30,
     exerciseCurrent: 20,
     // Weekly history
@@ -2262,26 +2268,29 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   const [showFoodLog, setShowFoodLog] = useState(false);
   const [tool, setTool] = useState(null); // weight | symptoms | photos | labs | coach
 
-  // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
-  // was logged in previous sessions today, not the stale starting values.
+  // Sync today's logged food into Daily Goals so Protein/Fiber/Sugar reflect
+  // what was logged in previous sessions today, not the stale starting values.
   // Also recompute the streak so it accounts for any missed-day grace.
   useEffect(() => {
     const entries = loadFoodLog(todayKey());
-    let protein = 0, fiber = 0;
+    let protein = 0, fiber = 0, sugar = 0;
     entries.forEach(e => {
       const s = e.servings || 1;
       protein += (e.protein || 0) * s;
       fiber += (e.fiber || 0) * s;
+      sugar += (e.sugar || 0) * s;
     });
     const nextProtein = Math.round(protein);
     const nextFiber = Math.round(fiber);
+    const nextSugar = Math.round(sugar);
     const nextStreak = computeStreak();
     if (
       user.proteinCurrent !== nextProtein ||
       user.fiberCurrent !== nextFiber ||
+      user.sugarCurrent !== nextSugar ||
       user.currentStreak !== nextStreak
     ) {
-      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, currentStreak: nextStreak });
+      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, sugarCurrent: nextSugar, currentStreak: nextStreak });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2424,6 +2433,16 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.fiberGoal}
             unit="g"
             color="#C4956A"
+            lockedHint="Log in Food Log"
+          />
+          <GoalCard
+            icon={<SugarIcon />}
+            label="Sugar"
+            current={user.sugarCurrent || 0}
+            goal={user.sugarLimit || 25}
+            unit="g"
+            color="#D17A7A"
+            isCap
             lockedHint="Log in Food Log"
           />
           <GoalCard
@@ -3088,8 +3107,14 @@ function ComplianceCard({ user }) {
   );
 }
 
-function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint }) {
-  const percentage = Math.round((current / goal) * 100);
+function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint, isCap }) {
+  const ratio = goal > 0 ? current / goal : 0;
+  const percentage = Math.round(ratio * 100);
+  // For cap-style metrics (sugar), exceeding the limit is bad — recolor red.
+  // The progress bar fill stops at 100% so the visual stays inside the card.
+  const over = isCap && current > goal;
+  const displayColor = over ? '#C44545' : color;
+  const fillWidth = Math.min(100, percentage);
   const interactive = typeof onIncrement === 'function';
 
   return (
@@ -3099,10 +3124,10 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement, locked
       onClick={interactive ? onIncrement : undefined}
     >
       <div style={styles.goalHeader}>
-        <div style={{...styles.goalIcon, backgroundColor: `${color}15`}}>
-          {React.cloneElement(icon, { color })}
+        <div style={{...styles.goalIcon, backgroundColor: `${displayColor}15`}}>
+          {React.cloneElement(icon, { color: displayColor })}
         </div>
-        <span style={{...styles.goalPercentage, color}}>{percentage}%</span>
+        <span style={{...styles.goalPercentage, color: displayColor}}>{percentage}%</span>
       </div>
       <div style={styles.goalProgress}>
         <div style={styles.progressBar}>
@@ -3110,13 +3135,13 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement, locked
             className="progress-bar-fill"
             style={{
               ...styles.progressFill,
-              width: `${percentage}%`,
-              backgroundColor: color
+              width: `${fillWidth}%`,
+              backgroundColor: displayColor
             }}
           />
         </div>
       </div>
-      <p style={styles.goalLabel}>{label}</p>
+      <p style={styles.goalLabel}>{label}{isCap ? ' (cap)' : ''}</p>
       <p style={styles.goalValue}>{current}<span style={styles.goalUnit}>/{goal}{unit}</span></p>
       {!interactive && lockedHint && (
         <p style={{fontSize: 10, color: '#9B9B9B', margin: '4px 0 0', fontStyle: 'italic'}}>{lockedHint}</p>
@@ -3188,6 +3213,7 @@ function NutritionScreen({ user, setUser }) {
         <div style={styles.macroOverview}>
           <MacroCircle label="Protein" current={user.proteinCurrent} goal={user.proteinGoal} color="#4A6741" />
           <MacroCircle label="Fiber" current={user.fiberCurrent} goal={user.fiberGoal} color="#C4956A" />
+          <MacroCircle label="Sugar" current={user.sugarCurrent || 0} goal={user.sugarLimit || 25} color="#D17A7A" isCap />
           <MacroCircle label="Water" current={user.waterCurrent} goal={user.waterGoal} color="#2AABB3" unit="oz" />
         </div>
 
@@ -3440,7 +3466,9 @@ function MealCard({ meal, user, setUser }) {
     setUser({
       ...user,
       proteinCurrent: Math.min(user.proteinGoal, user.proteinCurrent + meal.protein),
-      fiberCurrent: Math.min(user.fiberGoal, user.fiberCurrent + meal.fiber)
+      fiberCurrent: Math.min(user.fiberGoal, user.fiberCurrent + meal.fiber),
+      // Sugar is uncapped — the over-limit visual is the signal.
+      sugarCurrent: (user.sugarCurrent || 0) + (meal.sugar || 0),
     });
   };
 
@@ -3457,7 +3485,7 @@ function MealCard({ meal, user, setUser }) {
           <p style={styles.mealPlanType}>{meal.type?.charAt(0).toUpperCase() + meal.type?.slice(1)}</p>
           <h4 style={styles.mealPlanName}>{meal.name}</h4>
           <p style={styles.mealPlanMacros}>
-            {meal.calories} cal · {meal.protein}g protein · {meal.fiber}g fiber
+            {meal.calories} cal · {meal.protein}g protein · {meal.fiber}g fiber · {meal.sugar || 0}g sugar
           </p>
         </div>
         <div style={styles.mealExpandIcon}>{expanded ? '−' : '+'}</div>
@@ -3650,6 +3678,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 28,
             fat: 12,
             fiber: 5,
+            sugar: 14,
             ingredients: ['1 cup plain Greek yogurt (2%)', '1/2 cup mixed berries', '1 tbsp almond butter', '1 tbsp chia seeds'],
             instructions: 'Add yogurt to a bowl. Top with berries, drizzle almond butter, and sprinkle chia seeds.',
             glp1Tip: 'Eat the yogurt slowly—protein-rich foods help you feel satisfied longer on GLP-1.',
@@ -3664,6 +3693,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 15,
             fat: 24,
             fiber: 8,
+            sugar: 4,
             ingredients: ['5 oz grilled chicken breast', '3 cups mixed greens', '1/2 avocado', '1/4 cup cherry tomatoes', '2 tbsp olive oil vinaigrette'],
             instructions: 'Arrange greens on plate. Top with sliced chicken, avocado, and tomatoes. Drizzle with dressing.',
             glp1Tip: 'Start with the chicken bites first to prioritize protein absorption.',
@@ -3678,6 +3708,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 28,
             fat: 22,
             fiber: 6,
+            sugar: 3,
             ingredients: ['6 oz salmon fillet', '1 cup asparagus', '1/2 cup cooked quinoa', '1 tbsp olive oil', 'Lemon, garlic, herbs'],
             instructions: 'Season salmon and bake at 400°F for 12-15 min. Roast asparagus alongside. Serve over quinoa.',
             glp1Tip: 'If you feel full quickly, save the quinoa for later—prioritize the protein and veggies.',
@@ -3688,7 +3719,7 @@ Daily Protein Target: ${proteinTarget}g minimum
           { name: 'Cottage cheese with cucumber', emoji: '🥒', calories: 120, protein: 14, description: '1/2 cup cottage cheese with sliced cucumber' },
           { name: 'Turkey roll-ups', emoji: '🦃', calories: 100, protein: 12, description: '3 slices turkey wrapped around cheese stick' }
         ],
-        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 19 }
+        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 19, sugar: 21 }
       },
       {
         day: 'Tuesday',
@@ -3702,6 +3733,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 12,
             fat: 14,
             fiber: 4,
+            sugar: 2,
             ingredients: ['5 egg whites', '1 whole egg', '1 cup spinach', '1/4 cup tomatoes', '2 tbsp feta cheese'],
             instructions: 'Sauté spinach and tomatoes. Add whisked eggs and scramble. Top with feta.',
             glp1Tip: 'Eggs are easy to digest on GLP-1—a great breakfast protein source.',
@@ -3716,6 +3748,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 18,
             fat: 18,
             fiber: 5,
+            sugar: 3,
             ingredients: ['5 oz ground turkey', 'Butter lettuce leaves', '1/4 cup diced bell peppers', 'Asian sauce', 'Green onions'],
             instructions: 'Cook seasoned turkey. Spoon into lettuce cups with peppers and sauce.',
             glp1Tip: 'Lettuce wraps are perfect for GLP-1—light but protein-packed.',
@@ -3730,6 +3763,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 22,
             fat: 20,
             fiber: 7,
+            sugar: 4,
             ingredients: ['6 oz shrimp', '2 cups mixed stir-fry vegetables', '1 cup cauliflower rice', '1 tbsp sesame oil', 'Garlic, ginger, soy sauce'],
             instructions: 'Stir-fry shrimp with garlic and ginger. Add vegetables. Serve over cauliflower rice.',
             glp1Tip: 'Shrimp is lean and easy to digest—eat protein first, then veggies.',
@@ -3740,7 +3774,7 @@ Daily Protein Target: ${proteinTarget}g minimum
           { name: 'Hard-boiled eggs', emoji: '🥚', calories: 140, protein: 12, description: '2 hard-boiled eggs with everything seasoning' },
           { name: 'Edamame', emoji: '🫛', calories: 120, protein: 11, description: '1/2 cup shelled edamame with sea salt' }
         ],
-        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 16 }
+        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 16, sugar: 9 }
       }
     ],
     hydrationTip: 'Set a timer to drink 8oz of water every 2 hours. GLP-1 can reduce thirst signals, so stay proactive!',
@@ -4010,11 +4044,16 @@ Daily Protein Target: ${proteinTarget}g minimum
 }
 
 // Macro Circle Component
-function MacroCircle({ label, current, goal, color, unit = 'g' }) {
-  const percentage = Math.round((current / goal) * 100);
+function MacroCircle({ label, current, goal, color, unit = 'g', isCap }) {
+  const ratio = goal > 0 ? current / goal : 0;
+  const percentage = Math.round(ratio * 100);
+  // Cap-style metrics (sugar) recolor red and clamp the ring at 100% once over.
+  const over = isCap && current > goal;
+  const displayColor = over ? '#C44545' : color;
+  const fillRatio = Math.min(1, ratio);
   const radius = 36;
   const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (percentage / 100) * circumference;
+  const strokeDashoffset = circumference - fillRatio * circumference;
 
   return (
     <div style={styles.macroCircle}>
@@ -4023,7 +4062,7 @@ function MacroCircle({ label, current, goal, color, unit = 'g' }) {
         <circle
           cx="45" cy="45" r={radius}
           fill="none"
-          stroke={color}
+          stroke={displayColor}
           strokeWidth="6"
           strokeLinecap="round"
           strokeDasharray={circumference}
@@ -10562,6 +10601,15 @@ function FiberIcon({ color = '#C4956A' }) {
   );
 }
 
+function SugarIcon({ color = '#D17A7A' }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="6" width="12" height="9" rx="1.5" stroke={color} strokeWidth="1.5" fill="none"/>
+      <path d="M4 10H16M10 6V15" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
 function ExerciseIcon({ color = '#9B7E9B' }) {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -10614,6 +10662,8 @@ const extractNutrients = (food) => {
     else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
     else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
     else if (id === 1079 || name.includes('fiber')) out.fiber = Math.round(value * 10) / 10;
+    // 2000 = Sugars, total including NLEA; 1063 = Sugars, Total.
+    else if (id === 2000 || id === 1063 || name.includes('sugar')) out.sugar = Math.round(value * 10) / 10;
   }
   return out;
 };
@@ -10640,20 +10690,26 @@ function FoodLogScreen({ user, setUser, onBack }) {
       acc.carbs += e.carbs * e.servings;
       acc.fat += e.fat * e.servings;
       acc.fiber += (e.fiber || 0) * e.servings;
+      acc.sugar += (e.sugar || 0) * e.servings;
       return acc;
     },
-    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0 }
   );
 
-  // Daily Goals (Protein & Fiber) are derived from the food log — push the
-  // running totals back up so HomeScreen reflects what's been logged.
+  // Daily Goals (Protein, Fiber, Sugar) are derived from the food log — push
+  // the running totals back up so HomeScreen reflects what's been logged.
   useEffect(() => {
     if (!setUser) return;
     const nextProtein = Math.round(totals.protein);
     const nextFiber = Math.round(totals.fiber);
-    if (user.proteinCurrent === nextProtein && user.fiberCurrent === nextFiber) return;
-    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
-  }, [totals.protein, totals.fiber, setUser]);
+    const nextSugar = Math.round(totals.sugar);
+    if (
+      user.proteinCurrent === nextProtein &&
+      user.fiberCurrent === nextFiber &&
+      user.sugarCurrent === nextSugar
+    ) return;
+    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, sugarCurrent: nextSugar });
+  }, [totals.protein, totals.fiber, totals.sugar, setUser]);
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
   const [recents, setRecents] = useState([]);
@@ -10707,6 +10763,10 @@ function FoodLogScreen({ user, setUser, onBack }) {
           <div style={styles.foodLogMacroItem}>
             <span style={{...styles.foodLogMacroValue, color: '#9B7E9B'}}>{Math.round(totals.fat)}g</span>
             <span style={styles.foodLogMacroLabel}>Fat</span>
+          </div>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: Math.round(totals.sugar) > (user.sugarLimit || 25) ? '#C44545' : '#D17A7A'}}>{Math.round(totals.sugar)}g</span>
+            <span style={styles.foodLogMacroLabel}>Sugar</span>
           </div>
         </div>
       </div>
@@ -11304,6 +11364,7 @@ function PhotoFoodModal({ onClose, onConfirm }) {
         carbs: Number(it.carbs) || 0,
         fat: Number(it.fat) || 0,
         fiber: Number(it.fiber) || 0,
+        sugar: Number(it.sugar) || 0,
         servings: Number(it._servings) || 1,
       }));
     if (chosen.length === 0) {
@@ -11426,7 +11487,7 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                   type="button"
                   onClick={() => setItems([...items, {
                     name: '', servingLabel: '1 serving',
-                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0,
+                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0,
                     confidence: 'low',
                     _include: true, _servings: 1, _editing: true, _manual: true,
                   }])}
@@ -11511,12 +11572,13 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                               style={{width:'100%',padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
                             />
                           </label>
-                          <div style={{display:'grid',gridTemplateColumns:'repeat(5, 1fr)',gap:6}}>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(6, 1fr)',gap:6}}>
                             {numInput('calories', 'Cal')}
                             {numInput('protein', 'Protein g')}
                             {numInput('carbs', 'Carbs g')}
                             {numInput('fat', 'Fat g')}
                             {numInput('fiber', 'Fiber g')}
+                            {numInput('sugar', 'Sugar g')}
                           </div>
                           <button
                             type="button"
