@@ -48,6 +48,8 @@ function useProviderActivitySync(user) {
       proteinGoal: user.proteinGoal,
       fiberCurrent: user.fiberCurrent,
       fiberGoal: user.fiberGoal,
+      sugarCurrent: user.sugarCurrent,
+      sugarLimit: user.sugarLimit,
       exerciseCurrent: user.exerciseCurrent,
       exerciseGoal: user.exerciseGoal,
       medicationDose: user.medicationDose,
@@ -246,6 +248,7 @@ const pushRecentFood = (food) => {
     carbs: food.carbs,
     fat: food.fat,
     fiber: food.fiber || 0,
+    sugar: food.sugar || 0,
   }, ...filtered]);
 };
 
@@ -308,6 +311,24 @@ const authApi = {
       method: 'POST', headers: { 'Authorization': `Bearer ${token}` },
     }).catch(() => {});
   },
+  requestLoginCode: async (identifier) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth-link?action=request`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not send a code.');
+    return data;
+  },
+  verifyLoginCode: async (identifier, code) => {
+    const r = await fetch(`${PROVIDER_API_BASE}/api/patient-app-auth-link?action=verify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, code }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not verify the code.');
+    return data;
+  },
 };
 
 // Patient-side calls for the five new health-tools endpoints. Every call
@@ -360,7 +381,136 @@ const healthApi = {
     post: (entry) => healthApi._call('/api/patient-body-scans', { method: 'POST', body: JSON.stringify(entry) }),
     delete: (id) => healthApi._call(`/api/patient-body-scans?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
   },
+  push: {
+    config: () => healthApi._call('/api/patient-app-push'),
+    subscribe: (subscription, prefs) =>
+      healthApi._call('/api/patient-app-push', { method: 'POST', body: JSON.stringify({ subscription, prefs }) }),
+    updatePrefs: (endpoint, prefs) =>
+      healthApi._call('/api/patient-app-push', { method: 'PATCH', body: JSON.stringify({ endpoint, prefs }) }),
+    unsubscribe: (endpoint) =>
+      healthApi._call('/api/patient-app-push', { method: 'DELETE', body: JSON.stringify({ endpoint }) }),
+  },
 };
+
+// ── Offline write queue ───────────────────────────────────────────────────
+// Wraps healthApi writes so a patient logging a weight on the subway gets
+// the entry persisted locally and POSTed to the server the moment the
+// browser comes back online. localStorage is fine at this scale — entries
+// are tiny JSON.
+const OFFLINE_QUEUE_KEY = 'hydr801.offlineQueue.v1';
+
+function loadOfflineQueue() {
+  if (typeof window === 'undefined') return [];
+  try { return JSON.parse(window.localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveOfflineQueue(items) {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(items)); } catch {}
+}
+
+const offlineQueue = {
+  size: () => loadOfflineQueue().length,
+  add: (path, opts) => {
+    const items = loadOfflineQueue();
+    items.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      path, opts, queuedAt: new Date().toISOString(),
+    });
+    saveOfflineQueue(items);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hydr801:queueChanged', { detail: { size: items.length } }));
+    }
+  },
+  flush: async () => {
+    const items = loadOfflineQueue();
+    if (items.length === 0) return { sent: 0, failed: 0 };
+    const remaining = [];
+    let sent = 0, failed = 0;
+    for (const item of items) {
+      try {
+        await healthApi._call(item.path, item.opts);
+        sent += 1;
+      } catch (e) {
+        // Treat network errors as "still offline" and keep in queue.
+        // Anything 4xx (validation) we drop — re-queueing won't fix it.
+        const msg = String(e?.message || '');
+        const isTransient = /Failed to fetch|NetworkError|timeout|503|504/i.test(msg);
+        if (isTransient) remaining.push(item); else failed += 1;
+      }
+    }
+    saveOfflineQueue(remaining);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hydr801:queueChanged', { detail: { size: remaining.length } }));
+    }
+    return { sent, failed, stillQueued: remaining.length };
+  },
+};
+
+// Wrap a write so it queues on a network failure. Endpoints we care about
+// (weights, symptoms, workouts) are already idempotent server-side on
+// (user_id, recordedAt) so a retry can't double-log.
+function offlineSafeWrite(path, opts) {
+  return healthApi._call(path, opts).catch((e) => {
+    const msg = String(e?.message || '');
+    const offline = (typeof navigator !== 'undefined' && !navigator.onLine)
+      || /Failed to fetch|NetworkError/i.test(msg);
+    if (offline) {
+      offlineQueue.add(path, opts);
+      return { queued: true, offline: true };
+    }
+    throw e;
+  });
+}
+
+// Patch the post() methods for endpoints that benefit from offline retry.
+healthApi.weights.post   = (entry) => offlineSafeWrite('/api/patient-weights',  { method: 'POST', body: JSON.stringify(entry) });
+healthApi.symptoms.post  = (entry) => offlineSafeWrite('/api/patient-symptoms', { method: 'POST', body: JSON.stringify(entry) });
+healthApi.workouts.post  = (entry) => offlineSafeWrite('/api/patient-workouts', { method: 'POST', body: JSON.stringify(entry) });
+
+// Convert a base64url VAPID public key string into the Uint8Array that
+// PushManager.subscribe wants.
+function vapidKeyToUint8(base64UrlString) {
+  const padding = '='.repeat((4 - base64UrlString.length % 4) % 4);
+  const base64 = (base64UrlString + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+// Subscribe this device to push notifications. Returns the saved
+// subscription on success, or throws with a human-readable reason — the
+// caller is expected to surface that in the UI.
+async function enablePushNotifications() {
+  if (typeof window === 'undefined') throw new Error('not in browser');
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    throw new Error('Your browser doesn\'t support push notifications.');
+  }
+  // iOS 16.4+ only delivers push to PWAs added to the home screen.
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  if (isIOS && !isStandalone) {
+    throw new Error('On iPhone, add HYDR801 to your Home Screen first (Share → Add to Home Screen), then open it from there and try again.');
+  }
+
+  const reg = await navigator.serviceWorker.ready;
+  const cfg = await healthApi.push.config();
+  if (!cfg?.publicKey) throw new Error('Push isn\'t configured on the server yet. Tell support.');
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Permission denied — you can enable it later from your phone settings.');
+
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: vapidKeyToUint8(cfg.publicKey),
+    });
+  }
+  await healthApi.push.subscribe(sub.toJSON());
+  return sub.toJSON();
+}
 
 // Default state for a brand-new patient (used when their saved state is empty).
 // Mirrors the mock state HYDR801App used to start with.
@@ -387,6 +537,7 @@ function defaultPatientState(profile) {
     waterGoal: 80, waterCurrent: 0,
     proteinGoal: 120, proteinCurrent: 0,
     fiberGoal: 25, fiberCurrent: 0,
+    sugarLimit: 25, sugarCurrent: 0,
     exerciseGoal: 30, exerciseCurrent: 0,
     weeklyHistory: [],
     providerNotes: [],
@@ -472,6 +623,8 @@ export default function HYDR801App() {
     proteinCurrent: 65,
     fiberGoal: 25,
     fiberCurrent: 12,
+    sugarLimit: 25,
+    sugarCurrent: 8,
     exerciseGoal: 30,
     exerciseCurrent: 20,
     // Weekly history
@@ -695,6 +848,17 @@ export default function HYDR801App() {
     setAppMode('patient');
   };
 
+  // Drain the offline write queue whenever we have a token and the device
+  // says it's online. Also re-tries on every 'online' event after a
+  // network blip.
+  useEffect(() => {
+    if (!authToken) return;
+    const flush = () => { if (navigator.onLine) offlineQueue.flush().catch(() => {}); };
+    flush();
+    window.addEventListener('online', flush);
+    return () => window.removeEventListener('online', flush);
+  }, [authToken]);
+
   // Still checking session / loading saved state — render a quick splash so
   // the welcome onboarding doesn't flash before we know who the user is.
   if (!authChecked) {
@@ -799,6 +963,7 @@ export default function HYDR801App() {
       {activeModal && (
         <Modal activeModal={activeModal} setActiveModal={setActiveModal} />
       )}
+      <OfflineQueueChip />
     </div>
   );
 }
@@ -924,17 +1089,23 @@ const globalStyles = `
 // Sign-in / sign-up gate. Renders before onboarding so the patient is bound
 // to a real account before they start logging anything.
 function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
-  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  // 'link' = passwordless (default). 'login'/'signup' = legacy password path.
+  const [mode, setMode] = useState('link');
+  // Magic-link flow state
+  const [identifier, setIdentifier] = useState('');
+  const [channel, setChannel] = useState(null);   // 'email' | 'phone' once code sent
+  const [code, setCode] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  // Legacy password fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(initialError || null);
 
-  const submit = async (e) => {
+  const submitPassword = async (e) => {
     e?.preventDefault?.();
-    setError(null);
-    setBusy(true);
+    setError(null); setBusy(true);
     try {
       const data = mode === 'signup'
         ? await authApi.signup(email.trim(), password, name.trim())
@@ -942,9 +1113,34 @@ function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
       await onSuccess(data);
     } catch (err) {
       setError(err.message || 'Something went wrong');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
+  };
+
+  const requestCode = async (e) => {
+    e?.preventDefault?.();
+    setError(null); setBusy(true);
+    try {
+      const r = await authApi.requestLoginCode(identifier.trim());
+      setChannel(r.channel);
+      setCodeSent(true);
+    } catch (err) {
+      setError(err.message || 'Could not send a code.');
+    } finally { setBusy(false); }
+  };
+
+  const verifyCode = async (e) => {
+    e?.preventDefault?.();
+    setError(null); setBusy(true);
+    try {
+      const data = await authApi.verifyLoginCode(identifier.trim(), code.trim());
+      await onSuccess(data);
+    } catch (err) {
+      setError(err.message || 'Could not verify the code.');
+    } finally { setBusy(false); }
+  };
+
+  const resetLinkFlow = () => {
+    setCodeSent(false); setCode(''); setChannel(null); setError(null);
   };
 
   return (
@@ -956,60 +1152,116 @@ function AuthScreen({ onSuccess, onSkipAsDemo, initialError }) {
       </div>
 
       <div style={{background:'#fff',borderRadius:16,padding:20,boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-        <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
-          <button
-            onClick={() => { setMode('login'); setError(null); }}
-            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
-          >Sign in</button>
-          <button
-            onClick={() => { setMode('signup'); setError(null); }}
-            style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
-          >Create account</button>
-        </div>
-
-        <form onSubmit={submit}>
-          {mode === 'signup' && (
-            <div style={{marginBottom:12}}>
-              <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
-              <input
-                type="text" value={name} onChange={(e) => setName(e.target.value)}
-                placeholder="Your name" autoComplete="name"
-                style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-              />
+        {mode === 'link' ? (
+          codeSent ? (
+            <form onSubmit={verifyCode}>
+              <p style={{fontSize:13,color:'#2B2B2B',marginBottom:14}}>
+                We sent a 6-digit code to your {channel === 'email' ? 'email' : 'phone'}. Enter it below.
+              </p>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Code</label>
+                <input
+                  type="text" inputMode="numeric" pattern="\d{6}" maxLength={6}
+                  value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                  placeholder="123456" autoComplete="one-time-code" required autoFocus
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:20,letterSpacing:6,textAlign:'center',background:'#FAFAF8',color:'#2B2B2B',fontFamily:'monospace'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || code.length !== 6}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || code.length !== 6) ? 0.7 : 1}}
+              >{busy ? 'Verifying…' : 'Sign in'}</button>
+              <button
+                type="button" onClick={resetLinkFlow}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'1px solid #EAE8E4',borderRadius:10,fontSize:13,cursor:'pointer'}}
+              >← Use a different email or phone</button>
+            </form>
+          ) : (
+            <form onSubmit={requestCode}>
+              <p style={{fontSize:13,color:'#2B2B2B',marginBottom:14}}>
+                Sign in with a one-time code — no password needed.
+              </p>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email or phone</label>
+                <input
+                  type="text" value={identifier} onChange={(e) => setIdentifier(e.target.value)}
+                  placeholder="you@example.com or (555) 123-4567"
+                  autoComplete="email" required autoFocus
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || !identifier.trim()}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !identifier.trim()) ? 0.7 : 1}}
+              >{busy ? 'Sending…' : 'Send me a code'}</button>
+              <button
+                type="button" onClick={() => { setMode('login'); setError(null); }}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'none',fontSize:12,cursor:'pointer',textDecoration:'underline'}}
+              >Use a password instead</button>
+            </form>
+          )
+        ) : (
+          <>
+            <div style={{display:'flex',gap:0,marginBottom:18,borderBottom:'1px solid #EAE8E4'}}>
+              <button
+                onClick={() => { setMode('login'); setError(null); }}
+                style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='login'?600:400,color:mode==='login'?'#4A6741':'#888',borderBottom:mode==='login'?'2px solid #4A6741':'2px solid transparent'}}
+              >Sign in</button>
+              <button
+                onClick={() => { setMode('signup'); setError(null); }}
+                style={{flex:1,padding:'10px 0',border:'none',background:'none',cursor:'pointer',fontSize:14,fontWeight:mode==='signup'?600:400,color:mode==='signup'?'#4A6741':'#888',borderBottom:mode==='signup'?'2px solid #4A6741':'2px solid transparent'}}
+              >Create account</button>
             </div>
-          )}
-          <div style={{marginBottom:12}}>
-            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
-            <input
-              type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com" autoComplete="email" required
-              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-            />
-          </div>
-          <div style={{marginBottom:14}}>
-            <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
-            <input
-              type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-              placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
-              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-              minLength={mode === 'signup' ? 8 : undefined} required
-              style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
-            />
-          </div>
 
-          {error && (
-            <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
-            style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
-          >
-            {busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}
-          </button>
-        </form>
+            <form onSubmit={submitPassword}>
+              {mode === 'signup' && (
+                <div style={{marginBottom:12}}>
+                  <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Name</label>
+                  <input
+                    type="text" value={name} onChange={(e) => setName(e.target.value)}
+                    placeholder="Your name" autoComplete="name"
+                    style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                  />
+                </div>
+              )}
+              <div style={{marginBottom:12}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Email</label>
+                <input
+                  type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com" autoComplete="email" required
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              <div style={{marginBottom:14}}>
+                <label style={{fontSize:11,color:'#9B9B9B',textTransform:'uppercase',letterSpacing:0.4}}>Password</label>
+                <input
+                  type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                  placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your password'}
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  minLength={mode === 'signup' ? 8 : undefined} required
+                  style={{width:'100%',padding:'12px',marginTop:4,border:'1px solid #EAE8E4',borderRadius:8,fontSize:14,background:'#FAFAF8',color:'#2B2B2B'}}
+                />
+              </div>
+              {error && (
+                <div style={{padding:'8px 12px',background:'#FFF1ED',color:'#9B3B1C',borderRadius:8,fontSize:12,marginBottom:12}}>{error}</div>
+              )}
+              <button
+                type="submit" disabled={busy || !email || !password || (mode==='signup' && password.length < 8)}
+                style={{width:'100%',padding:'13px',background:busy ? '#7E9A75' : '#4A6741',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,cursor:busy?'wait':'pointer',opacity:(busy || !email || !password) ? 0.7 : 1}}
+              >{busy ? 'Please wait…' : (mode === 'signup' ? 'Create account' : 'Sign in')}</button>
+              <button
+                type="button" onClick={() => { setMode('link'); setError(null); }}
+                style={{marginTop:10,width:'100%',padding:'10px',background:'none',color:'#4A6741',border:'none',fontSize:12,cursor:'pointer',textDecoration:'underline'}}
+              >← Use a one-time code instead</button>
+            </form>
+          </>
+        )}
 
         {onSkipAsDemo && (
           <button
@@ -1823,32 +2075,222 @@ function ProviderBottomNav({ currentScreen, setCurrentScreen }) {
   );
 }
 
+// Inline banner that appears when the patient lands on Home via the
+// "Refill your medication" push notification (?refill=1). Confirms with one
+// tap and pings the existing weno-proxy endpoint to kick off the refill.
+function RefillBanner() {
+  const [visible, setVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('refill') === '1') {
+      setVisible(true);
+      params.delete('refill');
+      const next = window.location.pathname + (params.toString() ? `?${params}` : '');
+      window.history.replaceState({}, '', next);
+    }
+  }, []);
+
+  if (!visible) return null;
+
+  const requestRefill = async () => {
+    setBusy(true); setError(null);
+    try {
+      const token = authApi.loadToken();
+      const r = await fetch(`${PROVIDER_API_BASE}/api/weno-proxy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ action: 'request-refill', source: 'patient-app' }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `server returned ${r.status}`);
+      setDone(true);
+    } catch (e) {
+      setError(e.message || 'Could not send refill request.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: '#FFF4E5', border: '1px solid #E0A05A', borderRadius: 12,
+      padding: '14px 16px', marginBottom: 16,
+    }}>
+      <strong style={{ color: '#8A4B00', fontSize: 14 }}>💊 Time to refill your medication</strong>
+      {done ? (
+        <p style={{ margin: '6px 0 0', fontSize: 13, color: '#3A6B2A' }}>
+          ✅ Refill request sent. Your clinic will process it shortly.
+        </p>
+      ) : (
+        <>
+          <p style={{ margin: '6px 0 10px', fontSize: 13, color: '#5B3A12' }}>
+            You're running low. Want us to start a refill with your clinic?
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={requestRefill}
+              disabled={busy}
+              style={{
+                flex: 1, background: '#4A6741', color: '#fff', border: 'none',
+                borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+              }}
+            >{busy ? 'Sending…' : 'Request refill'}</button>
+            <button
+              onClick={() => setVisible(false)}
+              style={{
+                background: 'transparent', color: '#5B3A12', border: '1px solid #E0A05A',
+                borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+              }}
+            >Not now</button>
+          </div>
+          {error && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#C24A4A' }}>{error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// One-shot card on Home asking the patient to turn on reminders. Dismisses
+// to localStorage so we don't nag every open. Only renders if push isn't
+// already enabled, the browser supports it, and the patient hasn't said no.
+function NotificationsCta() {
+  const [hidden, setHidden] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('Notification' in window) || !('serviceWorker' in navigator)) return;
+    if (localStorage.getItem('hydr801.notifCta.dismissed') === '1') return;
+    if (Notification.permission === 'granted') return;
+    if (Notification.permission === 'denied') return; // they already said no — don't ask again
+    setHidden(false);
+  }, []);
+
+  if (hidden) return null;
+
+  const enable = async () => {
+    setBusy(true); setError(null);
+    try {
+      await enablePushNotifications();
+      localStorage.setItem('hydr801.notifCta.dismissed', '1');
+      setHidden(true);
+    } catch (e) {
+      setError(e.message || 'Could not enable notifications.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismiss = () => {
+    localStorage.setItem('hydr801.notifCta.dismissed', '1');
+    setHidden(true);
+  };
+
+  return (
+    <div style={{
+      background: '#F1F7EE', border: '1px solid #4A6741', borderRadius: 12,
+      padding: '14px 16px', marginBottom: 16,
+    }}>
+      <strong style={{ color: '#2C4220', fontSize: 14 }}>🔔 Turn on reminders</strong>
+      <p style={{ margin: '6px 0 10px', fontSize: 13, color: '#3A5A30' }}>
+        Stay on track with injection, weigh-in, and refill nudges. You can change preferences later.
+      </p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={enable}
+          disabled={busy}
+          style={{
+            flex: 1, background: '#4A6741', color: '#fff', border: 'none',
+            borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+          }}
+        >{busy ? 'Enabling…' : 'Turn on'}</button>
+        <button
+          onClick={dismiss}
+          style={{
+            background: 'transparent', color: '#3A5A30', border: '1px solid #4A6741',
+            borderRadius: 8, padding: '10px 12px', fontWeight: 600, fontSize: 14,
+          }}
+        >Not now</button>
+      </div>
+      {error && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#C24A4A' }}>{error}</p>}
+    </div>
+  );
+}
+
+// Tiny bottom-center toast that shows up only when there are unsent writes
+// in the offline queue. Subscribes to the same custom event the queue
+// dispatches so flips happen instantly.
+function OfflineQueueChip() {
+  const [count, setCount] = useState(() => (typeof window === 'undefined' ? 0 : offlineQueue.size()));
+  const [online, setOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onQueue = (e) => setCount(e.detail?.size ?? offlineQueue.size());
+    const onUp = () => setOnline(true);
+    const onDown = () => setOnline(false);
+    window.addEventListener('hydr801:queueChanged', onQueue);
+    window.addEventListener('online', onUp);
+    window.addEventListener('offline', onDown);
+    return () => {
+      window.removeEventListener('hydr801:queueChanged', onQueue);
+      window.removeEventListener('online', onUp);
+      window.removeEventListener('offline', onDown);
+    };
+  }, []);
+  if (count === 0 && online) return null;
+  return (
+    <div style={{
+      position: 'fixed', left: '50%', transform: 'translateX(-50%)',
+      bottom: 84, zIndex: 1500,
+      background: online ? 'rgba(74, 103, 65, 0.95)' : 'rgba(155, 59, 28, 0.95)',
+      color: '#fff', padding: '8px 14px', borderRadius: 999,
+      fontSize: 12, fontWeight: 600,
+      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+    }}>
+      {online
+        ? `⏳ ${count} ${count === 1 ? 'entry' : 'entries'} syncing…`
+        : `📴 Offline — ${count || 'changes'} will sync when you reconnect`}
+    </div>
+  );
+}
+
 // Home Screen
 function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
   const [tool, setTool] = useState(null); // weight | symptoms | photos | labs | coach
 
-  // Sync today's logged food into Daily Goals so Protein/Fiber reflect what
-  // was logged in previous sessions today, not the stale starting values.
+  // Sync today's logged food into Daily Goals so Protein/Fiber/Sugar reflect
+  // what was logged in previous sessions today, not the stale starting values.
   // Also recompute the streak so it accounts for any missed-day grace.
   useEffect(() => {
     const entries = loadFoodLog(todayKey());
-    let protein = 0, fiber = 0;
+    let protein = 0, fiber = 0, sugar = 0;
     entries.forEach(e => {
       const s = e.servings || 1;
       protein += (e.protein || 0) * s;
       fiber += (e.fiber || 0) * s;
+      sugar += (e.sugar || 0) * s;
     });
     const nextProtein = Math.round(protein);
     const nextFiber = Math.round(fiber);
+    const nextSugar = Math.round(sugar);
     const nextStreak = computeStreak();
     if (
       user.proteinCurrent !== nextProtein ||
       user.fiberCurrent !== nextFiber ||
+      user.sugarCurrent !== nextSugar ||
       user.currentStreak !== nextStreak
     ) {
-      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, currentStreak: nextStreak });
+      setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, sugarCurrent: nextSugar, currentStreak: nextStreak });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1935,6 +2377,15 @@ function HomeScreen({ user, setUser, setActiveModal }) {
         </div>
       </header>
 
+      {/* Refill nudge — deep-linked from a tapped refill push notification */}
+      <RefillBanner />
+
+      {/* One-shot CTA to enable push — appears after the patient has done
+          at least one action so we're not asking on the cold-open screen. */}
+      {(user.currentStreak > 0 || (user.totalPoints || 0) > 0) && (
+        <NotificationsCta />
+      )}
+
       {/* Calendar with Injection Tracking - TOP */}
       <HomeCalendar user={user} setUser={setUser} />
 
@@ -1982,6 +2433,16 @@ function HomeScreen({ user, setUser, setActiveModal }) {
             goal={user.fiberGoal}
             unit="g"
             color="#C4956A"
+            lockedHint="Log in Food Log"
+          />
+          <GoalCard
+            icon={<SugarIcon />}
+            label="Sugar"
+            current={user.sugarCurrent || 0}
+            goal={user.sugarLimit || 25}
+            unit="g"
+            color="#D17A7A"
+            isCap
             lockedHint="Log in Food Log"
           />
           <GoalCard
@@ -2646,8 +3107,14 @@ function ComplianceCard({ user }) {
   );
 }
 
-function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint }) {
-  const percentage = Math.round((current / goal) * 100);
+function GoalCard({ icon, label, current, goal, unit, color, onIncrement, lockedHint, isCap }) {
+  const ratio = goal > 0 ? current / goal : 0;
+  const percentage = Math.round(ratio * 100);
+  // For cap-style metrics (sugar), exceeding the limit is bad — recolor red.
+  // The progress bar fill stops at 100% so the visual stays inside the card.
+  const over = isCap && current > goal;
+  const displayColor = over ? '#C44545' : color;
+  const fillWidth = Math.min(100, percentage);
   const interactive = typeof onIncrement === 'function';
 
   return (
@@ -2657,10 +3124,10 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement, locked
       onClick={interactive ? onIncrement : undefined}
     >
       <div style={styles.goalHeader}>
-        <div style={{...styles.goalIcon, backgroundColor: `${color}15`}}>
-          {React.cloneElement(icon, { color })}
+        <div style={{...styles.goalIcon, backgroundColor: `${displayColor}15`}}>
+          {React.cloneElement(icon, { color: displayColor })}
         </div>
-        <span style={{...styles.goalPercentage, color}}>{percentage}%</span>
+        <span style={{...styles.goalPercentage, color: displayColor}}>{percentage}%</span>
       </div>
       <div style={styles.goalProgress}>
         <div style={styles.progressBar}>
@@ -2668,13 +3135,13 @@ function GoalCard({ icon, label, current, goal, unit, color, onIncrement, locked
             className="progress-bar-fill"
             style={{
               ...styles.progressFill,
-              width: `${percentage}%`,
-              backgroundColor: color
+              width: `${fillWidth}%`,
+              backgroundColor: displayColor
             }}
           />
         </div>
       </div>
-      <p style={styles.goalLabel}>{label}</p>
+      <p style={styles.goalLabel}>{label}{isCap ? ' (cap)' : ''}</p>
       <p style={styles.goalValue}>{current}<span style={styles.goalUnit}>/{goal}{unit}</span></p>
       {!interactive && lockedHint && (
         <p style={{fontSize: 10, color: '#9B9B9B', margin: '4px 0 0', fontStyle: 'italic'}}>{lockedHint}</p>
@@ -2746,6 +3213,7 @@ function NutritionScreen({ user, setUser }) {
         <div style={styles.macroOverview}>
           <MacroCircle label="Protein" current={user.proteinCurrent} goal={user.proteinGoal} color="#4A6741" />
           <MacroCircle label="Fiber" current={user.fiberCurrent} goal={user.fiberGoal} color="#C4956A" />
+          <MacroCircle label="Sugar" current={user.sugarCurrent || 0} goal={user.sugarLimit || 25} color="#D17A7A" isCap />
           <MacroCircle label="Water" current={user.waterCurrent} goal={user.waterGoal} color="#2AABB3" unit="oz" />
         </div>
 
@@ -2998,7 +3466,9 @@ function MealCard({ meal, user, setUser }) {
     setUser({
       ...user,
       proteinCurrent: Math.min(user.proteinGoal, user.proteinCurrent + meal.protein),
-      fiberCurrent: Math.min(user.fiberGoal, user.fiberCurrent + meal.fiber)
+      fiberCurrent: Math.min(user.fiberGoal, user.fiberCurrent + meal.fiber),
+      // Sugar is uncapped — the over-limit visual is the signal.
+      sugarCurrent: (user.sugarCurrent || 0) + (meal.sugar || 0),
     });
   };
 
@@ -3015,7 +3485,7 @@ function MealCard({ meal, user, setUser }) {
           <p style={styles.mealPlanType}>{meal.type?.charAt(0).toUpperCase() + meal.type?.slice(1)}</p>
           <h4 style={styles.mealPlanName}>{meal.name}</h4>
           <p style={styles.mealPlanMacros}>
-            {meal.calories} cal · {meal.protein}g protein · {meal.fiber}g fiber
+            {meal.calories} cal · {meal.protein}g protein · {meal.fiber}g fiber · {meal.sugar || 0}g sugar
           </p>
         </div>
         <div style={styles.mealExpandIcon}>{expanded ? '−' : '+'}</div>
@@ -3208,6 +3678,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 28,
             fat: 12,
             fiber: 5,
+            sugar: 14,
             ingredients: ['1 cup plain Greek yogurt (2%)', '1/2 cup mixed berries', '1 tbsp almond butter', '1 tbsp chia seeds'],
             instructions: 'Add yogurt to a bowl. Top with berries, drizzle almond butter, and sprinkle chia seeds.',
             glp1Tip: 'Eat the yogurt slowly—protein-rich foods help you feel satisfied longer on GLP-1.',
@@ -3222,6 +3693,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 15,
             fat: 24,
             fiber: 8,
+            sugar: 4,
             ingredients: ['5 oz grilled chicken breast', '3 cups mixed greens', '1/2 avocado', '1/4 cup cherry tomatoes', '2 tbsp olive oil vinaigrette'],
             instructions: 'Arrange greens on plate. Top with sliced chicken, avocado, and tomatoes. Drizzle with dressing.',
             glp1Tip: 'Start with the chicken bites first to prioritize protein absorption.',
@@ -3236,6 +3708,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 28,
             fat: 22,
             fiber: 6,
+            sugar: 3,
             ingredients: ['6 oz salmon fillet', '1 cup asparagus', '1/2 cup cooked quinoa', '1 tbsp olive oil', 'Lemon, garlic, herbs'],
             instructions: 'Season salmon and bake at 400°F for 12-15 min. Roast asparagus alongside. Serve over quinoa.',
             glp1Tip: 'If you feel full quickly, save the quinoa for later—prioritize the protein and veggies.',
@@ -3246,7 +3719,7 @@ Daily Protein Target: ${proteinTarget}g minimum
           { name: 'Cottage cheese with cucumber', emoji: '🥒', calories: 120, protein: 14, description: '1/2 cup cottage cheese with sliced cucumber' },
           { name: 'Turkey roll-ups', emoji: '🦃', calories: 100, protein: 12, description: '3 slices turkey wrapped around cheese stick' }
         ],
-        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 19 }
+        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 19, sugar: 21 }
       },
       {
         day: 'Tuesday',
@@ -3260,6 +3733,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 12,
             fat: 14,
             fiber: 4,
+            sugar: 2,
             ingredients: ['5 egg whites', '1 whole egg', '1 cup spinach', '1/4 cup tomatoes', '2 tbsp feta cheese'],
             instructions: 'Sauté spinach and tomatoes. Add whisked eggs and scramble. Top with feta.',
             glp1Tip: 'Eggs are easy to digest on GLP-1—a great breakfast protein source.',
@@ -3274,6 +3748,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 18,
             fat: 18,
             fiber: 5,
+            sugar: 3,
             ingredients: ['5 oz ground turkey', 'Butter lettuce leaves', '1/4 cup diced bell peppers', 'Asian sauce', 'Green onions'],
             instructions: 'Cook seasoned turkey. Spoon into lettuce cups with peppers and sauce.',
             glp1Tip: 'Lettuce wraps are perfect for GLP-1—light but protein-packed.',
@@ -3288,6 +3763,7 @@ Daily Protein Target: ${proteinTarget}g minimum
             carbs: 22,
             fat: 20,
             fiber: 7,
+            sugar: 4,
             ingredients: ['6 oz shrimp', '2 cups mixed stir-fry vegetables', '1 cup cauliflower rice', '1 tbsp sesame oil', 'Garlic, ginger, soy sauce'],
             instructions: 'Stir-fry shrimp with garlic and ginger. Add vegetables. Serve over cauliflower rice.',
             glp1Tip: 'Shrimp is lean and easy to digest—eat protein first, then veggies.',
@@ -3298,7 +3774,7 @@ Daily Protein Target: ${proteinTarget}g minimum
           { name: 'Hard-boiled eggs', emoji: '🥚', calories: 140, protein: 12, description: '2 hard-boiled eggs with everything seasoning' },
           { name: 'Edamame', emoji: '🫛', calories: 120, protein: 11, description: '1/2 cup shelled edamame with sea salt' }
         ],
-        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 16 }
+        dailyTotals: { calories: calorieTarget, protein: proteinTarget, fiber: 16, sugar: 9 }
       }
     ],
     hydrationTip: 'Set a timer to drink 8oz of water every 2 hours. GLP-1 can reduce thirst signals, so stay proactive!',
@@ -3568,11 +4044,16 @@ Daily Protein Target: ${proteinTarget}g minimum
 }
 
 // Macro Circle Component
-function MacroCircle({ label, current, goal, color, unit = 'g' }) {
-  const percentage = Math.round((current / goal) * 100);
+function MacroCircle({ label, current, goal, color, unit = 'g', isCap }) {
+  const ratio = goal > 0 ? current / goal : 0;
+  const percentage = Math.round(ratio * 100);
+  // Cap-style metrics (sugar) recolor red and clamp the ring at 100% once over.
+  const over = isCap && current > goal;
+  const displayColor = over ? '#C44545' : color;
+  const fillRatio = Math.min(1, ratio);
   const radius = 36;
   const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (percentage / 100) * circumference;
+  const strokeDashoffset = circumference - fillRatio * circumference;
 
   return (
     <div style={styles.macroCircle}>
@@ -3581,7 +4062,7 @@ function MacroCircle({ label, current, goal, color, unit = 'g' }) {
         <circle
           cx="45" cy="45" r={radius}
           fill="none"
-          stroke={color}
+          stroke={displayColor}
           strokeWidth="6"
           strokeLinecap="round"
           strokeDasharray={circumference}
@@ -10120,6 +10601,15 @@ function FiberIcon({ color = '#C4956A' }) {
   );
 }
 
+function SugarIcon({ color = '#D17A7A' }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="6" width="12" height="9" rx="1.5" stroke={color} strokeWidth="1.5" fill="none"/>
+      <path d="M4 10H16M10 6V15" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
 function ExerciseIcon({ color = '#9B7E9B' }) {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -10172,6 +10662,8 @@ const extractNutrients = (food) => {
     else if (id === 1005 || name.includes('carbohydrate')) out.carbs = Math.round(value * 10) / 10;
     else if (id === 1004 || name.includes('total lipid') || name === 'total fat') out.fat = Math.round(value * 10) / 10;
     else if (id === 1079 || name.includes('fiber')) out.fiber = Math.round(value * 10) / 10;
+    // 2000 = Sugars, total including NLEA; 1063 = Sugars, Total.
+    else if (id === 2000 || id === 1063 || name.includes('sugar')) out.sugar = Math.round(value * 10) / 10;
   }
   return out;
 };
@@ -10198,20 +10690,26 @@ function FoodLogScreen({ user, setUser, onBack }) {
       acc.carbs += e.carbs * e.servings;
       acc.fat += e.fat * e.servings;
       acc.fiber += (e.fiber || 0) * e.servings;
+      acc.sugar += (e.sugar || 0) * e.servings;
       return acc;
     },
-    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0 }
   );
 
-  // Daily Goals (Protein & Fiber) are derived from the food log — push the
-  // running totals back up so HomeScreen reflects what's been logged.
+  // Daily Goals (Protein, Fiber, Sugar) are derived from the food log — push
+  // the running totals back up so HomeScreen reflects what's been logged.
   useEffect(() => {
     if (!setUser) return;
     const nextProtein = Math.round(totals.protein);
     const nextFiber = Math.round(totals.fiber);
-    if (user.proteinCurrent === nextProtein && user.fiberCurrent === nextFiber) return;
-    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber });
-  }, [totals.protein, totals.fiber, setUser]);
+    const nextSugar = Math.round(totals.sugar);
+    if (
+      user.proteinCurrent === nextProtein &&
+      user.fiberCurrent === nextFiber &&
+      user.sugarCurrent === nextSugar
+    ) return;
+    setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, sugarCurrent: nextSugar });
+  }, [totals.protein, totals.fiber, totals.sugar, setUser]);
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
   const [recents, setRecents] = useState([]);
@@ -10265,6 +10763,10 @@ function FoodLogScreen({ user, setUser, onBack }) {
           <div style={styles.foodLogMacroItem}>
             <span style={{...styles.foodLogMacroValue, color: '#9B7E9B'}}>{Math.round(totals.fat)}g</span>
             <span style={styles.foodLogMacroLabel}>Fat</span>
+          </div>
+          <div style={styles.foodLogMacroItem}>
+            <span style={{...styles.foodLogMacroValue, color: Math.round(totals.sugar) > (user.sugarLimit || 25) ? '#C44545' : '#D17A7A'}}>{Math.round(totals.sugar)}g</span>
+            <span style={styles.foodLogMacroLabel}>Sugar</span>
           </div>
         </div>
       </div>
@@ -10374,6 +10876,135 @@ function FoodLogScreen({ user, setUser, onBack }) {
   );
 }
 
+// Open Food Facts is a free public UPC database (no key needed). Returns
+// { name, servingLabel, calories, protein, carbs, fat } or throws.
+async function lookupBarcodeFood(upc) {
+  const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(upc)}.json?fields=product_name,brands,serving_size,nutriments,quantity`);
+  if (!r.ok) throw new Error(`Lookup failed (${r.status})`);
+  const data = await r.json();
+  if (data.status !== 1 || !data.product) {
+    throw new Error('No product found for that barcode.');
+  }
+  const p = data.product;
+  const n = p.nutriments || {};
+  // Open Food Facts nutriments are usually per-100g; pull serving-size
+  // values directly when present.
+  const calPer100 = Number(n['energy-kcal_100g']) || Number(n['energy-kcal']) || 0;
+  const proPer100 = Number(n['proteins_100g']) || Number(n.proteins) || 0;
+  const carbPer100 = Number(n['carbohydrates_100g']) || Number(n.carbohydrates) || 0;
+  const fatPer100 = Number(n['fat_100g']) || Number(n.fat) || 0;
+  const servingSize = p.serving_size || p.quantity || '100 g';
+  // Try to derive a per-serving multiplier from "30 g" / "1 cup (240 ml)".
+  const gMatch = String(servingSize).match(/(\d+(?:\.\d+)?)\s*g\b/i);
+  const factor = gMatch ? Number(gMatch[1]) / 100 : 1;
+  const name = [p.product_name, p.brands ? `(${p.brands.split(',')[0]})` : null].filter(Boolean).join(' ');
+  return {
+    name: name || `UPC ${upc}`,
+    servingLabel: servingSize,
+    calories: Math.max(0, Math.round(calPer100 * factor)),
+    protein:  Math.max(0, Math.round(proPer100 * factor * 10) / 10),
+    carbs:    Math.max(0, Math.round(carbPer100 * factor * 10) / 10),
+    fat:      Math.max(0, Math.round(fatPer100 * factor * 10) / 10),
+  };
+}
+
+// Live-camera barcode scanner using the browser's native BarcodeDetector.
+// No JS lib dep. Bails out with a clear message on browsers that don't
+// support it (older iOS Safari mostly).
+function BarcodeScanModal({ onClose, onScanned }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const [error, setError] = useState(null);
+  const [status, setStatus] = useState('Point at the barcode');
+
+  useEffect(() => {
+    let cancelled = false;
+    if (typeof window === 'undefined') return;
+
+    if (!('BarcodeDetector' in window)) {
+      setError("Your browser doesn't support barcode scanning. Try the latest Chrome or update to iOS 17+.");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Camera access isn't available on this browser.");
+      return;
+    }
+
+    const supported = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'];
+    const detector = new window.BarcodeDetector({ formats: supported });
+
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }, audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        const video = videoRef.current;
+        if (!video) return;
+        video.srcObject = stream;
+        await video.play();
+
+        const tick = async () => {
+          if (cancelled) return;
+          try {
+            const codes = await detector.detect(video);
+            const hit = codes.find(c => c.rawValue && /^\d{8,14}$/.test(c.rawValue));
+            if (hit) {
+              setStatus(`Found ${hit.rawValue}`);
+              onScanned(hit.rawValue);
+              return;
+            }
+          } catch { /* keep scanning */ }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch (e) {
+        setError(e.message || 'Could not access the camera.');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, [onScanned]);
+
+  return (
+    <div style={styles.foodModalBackdrop} onClick={onClose}>
+      <div style={{ ...styles.foodModal, padding: 0, overflow: 'hidden' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.foodModalHeader}>
+          <h2 style={styles.foodModalTitle}>📷 Scan barcode</h2>
+          <button style={styles.foodModalClose} onClick={onClose}>×</button>
+        </div>
+        <div style={{ background: '#000', position: 'relative', minHeight: 260 }}>
+          {error ? (
+            <p style={{ color: '#fff', padding: 24, textAlign: 'center', fontSize: 13 }}>{error}</p>
+          ) : (
+            <>
+              <video ref={videoRef} playsInline muted style={{ width: '100%', display: 'block' }} />
+              <div style={{
+                position: 'absolute', inset: 0, display: 'flex',
+                alignItems: 'center', justifyContent: 'center', pointerEvents: 'none',
+              }}>
+                <div style={{
+                  width: '70%', maxWidth: 260, height: 80,
+                  border: '2px solid rgba(74, 103, 65, 0.9)', borderRadius: 8,
+                }} />
+              </div>
+            </>
+          )}
+        </div>
+        <p style={{ textAlign: 'center', fontSize: 12, color: '#666', padding: '12px 16px' }}>
+          {error ? '' : status}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function AddFoodModal({ meal, onClose, onAdd }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -10382,10 +11013,27 @@ function AddFoodModal({ meal, onClose, onAdd }) {
   const [selected, setSelected] = useState(null);
   const [servings, setServings] = useState('1');
   const [showCustom, setShowCustom] = useState(false);
+  const [showBarcodeScan, setShowBarcodeScan] = useState(false);
+  const [barcodeLookup, setBarcodeLookup] = useState(false);
   const [custom, setCustom] = useState({ name: '', calories: '', protein: '', carbs: '', fat: '', servingLabel: '1 serving' });
   const [recents, setRecents] = useState([]);
   useEffect(() => { setRecents(loadRecentFoods()); }, []);
   const searchTimeoutRef = useRef(null);
+
+  const handleBarcode = async (upc) => {
+    setShowBarcodeScan(false);
+    setBarcodeLookup(true);
+    setError(null);
+    try {
+      const food = await lookupBarcodeFood(upc);
+      setSelected(food);
+      setServings('1');
+    } catch (e) {
+      setError(e.message || 'Could not look up that barcode.');
+    } finally {
+      setBarcodeLookup(false);
+    }
+  };
 
   useEffect(() => {
     if (!query.trim()) {
@@ -10571,8 +11219,19 @@ function AddFoodModal({ meal, onClose, onAdd }) {
                 <p style={styles.foodModalHint}>No matches found.</p>
               )}
             </div>
-            <button style={styles.secondaryButton} onClick={() => setShowCustom(true)}>+ Add custom food</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...styles.secondaryButton, flex: 1 }} onClick={() => setShowBarcodeScan(true)} disabled={barcodeLookup}>
+                {barcodeLookup ? 'Looking up…' : '📷 Scan barcode'}
+              </button>
+              <button style={{ ...styles.secondaryButton, flex: 1 }} onClick={() => setShowCustom(true)}>+ Add custom</button>
+            </div>
           </div>
+        )}
+        {showBarcodeScan && (
+          <BarcodeScanModal
+            onClose={() => setShowBarcodeScan(false)}
+            onScanned={handleBarcode}
+          />
         )}
       </div>
     </div>
@@ -10705,6 +11364,7 @@ function PhotoFoodModal({ onClose, onConfirm }) {
         carbs: Number(it.carbs) || 0,
         fat: Number(it.fat) || 0,
         fiber: Number(it.fiber) || 0,
+        sugar: Number(it.sugar) || 0,
         servings: Number(it._servings) || 1,
       }));
     if (chosen.length === 0) {
@@ -10827,7 +11487,7 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                   type="button"
                   onClick={() => setItems([...items, {
                     name: '', servingLabel: '1 serving',
-                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0,
+                    calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0,
                     confidence: 'low',
                     _include: true, _servings: 1, _editing: true, _manual: true,
                   }])}
@@ -10912,12 +11572,13 @@ function PhotoFoodModal({ onClose, onConfirm }) {
                               style={{width:'100%',padding:'6px 8px',border:'1px solid #EAE8E4',borderRadius:6,fontSize:12,background:'#fff'}}
                             />
                           </label>
-                          <div style={{display:'grid',gridTemplateColumns:'repeat(5, 1fr)',gap:6}}>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(6, 1fr)',gap:6}}>
                             {numInput('calories', 'Cal')}
                             {numInput('protein', 'Protein g')}
                             {numInput('carbs', 'Carbs g')}
                             {numInput('fat', 'Fat g')}
                             {numInput('fiber', 'Fiber g')}
+                            {numInput('sugar', 'Sugar g')}
                           </div>
                           <button
                             type="button"
@@ -19644,7 +20305,25 @@ function WorkoutLogScreen({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showLog, setShowLog] = useState(null);          // null | { prefill }
-  const [showImport, setShowImport] = useState(false);
+  const [importStage, setImportStage] = useState(null);  // null | 'scanning' | 'error'
+  const [importError, setImportError] = useState(null);
+  const [importWarnings, setImportWarnings] = useState([]);
+  const importFileRef = useRef(null);
+
+  const handleImportFile = async (file) => {
+    if (!file) return;
+    setImportStage('scanning'); setImportError(null); setImportWarnings([]);
+    try {
+      const { base64, mimeType } = await compressImageForVision(file);
+      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
+      setImportStage(null);
+      setShowLog({ prefill: parsed });
+    } catch (e) {
+      setImportError(e.message);
+      if (Array.isArray(e.warnings)) setImportWarnings(e.warnings);
+      setImportStage('error');
+    }
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -19675,8 +20354,17 @@ function WorkoutLogScreen({ onBack }) {
       </div>
 
       <button style={toolStyles.btnPrimary} onClick={() => setShowLog({})}>+ Log workout</button>
-      <button style={toolStyles.btnSecondary} onClick={() => setShowImport(true)}>
-        📲 Import from Apple Health / Strava
+      <input
+        ref={importFileRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; handleImportFile(f); }}
+      />
+      {/* iOS Safari only allows programmatic file-input clicks inside a user-
+          gesture handler — keep the .click() call synchronous in onClick. */}
+      <button style={toolStyles.btnSecondary} onClick={() => importFileRef.current?.click()}>
+        📲 Import from Apple Health / Google Fit / Strava
       </button>
 
       <h3 style={{ ...toolStyles.title, fontSize: 16, marginTop: 24, marginBottom: 10 }}>History</h3>
@@ -19720,11 +20408,37 @@ function WorkoutLogScreen({ onBack }) {
           onSaved={() => { setShowLog(null); refresh(); }}
         />
       )}
-      {showImport && (
-        <WorkoutImportModal
-          onClose={() => setShowImport(false)}
-          onParsed={(parsed) => { setShowImport(false); setShowLog({ prefill: parsed }); }}
-        />
+      {importStage && (
+        <div style={modalBackdropStyle} onClick={() => setImportStage(null)}>
+          <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
+            {importStage === 'scanning' && (
+              <>
+                <p style={{ ...toolStyles.small, marginBottom: 14 }}>
+                  Reading your screenshot — type, duration, calories, distance, and heart rate.
+                </p>
+                <button style={toolStyles.btnPrimary} disabled>🔍 Reading screenshot…</button>
+              </>
+            )}
+            {importStage === 'error' && (
+              <>
+                <div style={{ ...toolStyles.banner('#C24A4A'), marginBottom: 12 }}>
+                  <strong style={{ color: '#C24A4A' }}>{importError}</strong>
+                  {importWarnings.length > 0 && (
+                    <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
+                      {importWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                    </ul>
+                  )}
+                </div>
+                <button
+                  style={toolStyles.btnPrimary}
+                  onClick={() => { setImportStage(null); importFileRef.current?.click(); }}
+                >📷 Try a different screenshot</button>
+              </>
+            )}
+            <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={() => setImportStage(null)}>Cancel</button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -19846,59 +20560,6 @@ function WorkoutLogModal({ onClose, onSaved, prefill }) {
   );
 }
 
-function WorkoutImportModal({ onClose, onParsed }) {
-  const [stage, setStage] = useState('idle'); // idle | scanning | error
-  const [error, setError] = useState(null);
-  const [warnings, setWarnings] = useState([]);
-  const fileRef = useRef(null);
-
-  const handle = async (file) => {
-    if (!file) return;
-    setStage('scanning'); setError(null); setWarnings([]);
-    try {
-      const base64 = await fileToBase64(file);
-      const mimeType = file.type || 'image/jpeg';
-      const parsed = await healthApi.workouts.screenshotOcr(base64, mimeType);
-      onParsed(parsed);
-    } catch (e) {
-      setError(e.message);
-      if (Array.isArray(e.warnings)) setWarnings(e.warnings);
-      setStage('error');
-    }
-  };
-
-  return (
-    <div style={modalBackdropStyle} onClick={onClose}>
-      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
-        <h2 style={{ ...toolStyles.title, fontSize: 18, marginBottom: 8 }}>Import workout</h2>
-        <p style={{ ...toolStyles.small, marginBottom: 14 }}>
-          On iPhone, open the Health or Fitness app → tap a workout → screenshot the summary, then pick it here.
-          We'll parse type, duration, calories, distance, and heart rate automatically.
-        </p>
-
-        <input ref={fileRef} type="file" accept="image/*"
-               style={{ display: 'none' }}
-               onChange={(e) => handle(e.target.files?.[0])} />
-        <button style={toolStyles.btnPrimary} onClick={() => fileRef.current?.click()} disabled={stage === 'scanning'}>
-          {stage === 'scanning' ? '🔍 Reading screenshot…' : '📷 Pick screenshot from gallery'}
-        </button>
-
-        {error && (
-          <div style={{ ...toolStyles.banner('#C24A4A'), marginTop: 14 }}>
-            <strong style={{ color: '#C24A4A' }}>{error}</strong>
-            {warnings.length > 0 && (
-              <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: 12, color: '#6B6B6B' }}>
-                {warnings.map((w, i) => <li key={i}>{w}</li>)}
-              </ul>
-            )}
-          </div>
-        )}
-
-        <button style={{ ...toolStyles.btnSubtle, marginTop: 12 }} onClick={onClose}>Cancel</button>
-      </div>
-    </div>
-  );
-}
 
 // Shared modal styles + file→base64 helper used by all the modals below.
 const modalBackdropStyle = {
