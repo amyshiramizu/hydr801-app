@@ -20216,7 +20216,9 @@ function LabDetailModal({ result, onClose }) {
   );
 }
 
-// ── Meal coach ─────────────────────────────────────────────────────────────
+// ── Weekly health coach ────────────────────────────────────────────────────
+// Holistic coach: nutrition + workouts + injection adherence + weight + hydration.
+// Endpoint URL is still /api/meal-coach for backwards compat with shipped builds.
 const UPSELL_COPY = {
   'rd-consult': { label: 'Book a dietitian call', detail: '20 min 1:1 video — $49' },
   'iv-hydration': { label: 'Book IV hydration', detail: 'B-complex + electrolytes in-clinic' },
@@ -20244,7 +20246,7 @@ function MealCoachScreen({ onBack }) {
 
   return (
     <div style={toolStyles.screen} className="fade-in">
-      <ToolHeader title="AI meal coach" onBack={onBack} />
+      <ToolHeader title="AI health coach" onBack={onBack} />
       {error && <p style={toolStyles.errorText}>{error}</p>}
 
       {loading && <p style={toolStyles.small}>Reading your week…</p>}
