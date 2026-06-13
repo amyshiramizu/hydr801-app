@@ -2267,6 +2267,10 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   const [showInjectionTracker, setShowInjectionTracker] = useState(false);
   const [showFoodLog, setShowFoodLog] = useState(false);
   const [tool, setTool] = useState(null); // weight | symptoms | photos | labs | coach
+  // When the calendar deep-links into a logger for a specific date, these
+  // hold the YYYY-MM-DD; cleared on screen back.
+  const [foodLogDateKey, setFoodLogDateKey] = useState(null);
+  const [workoutPrefillDate, setWorkoutPrefillDate] = useState(null);
 
   // Sync today's logged food into Daily Goals so Protein/Fiber/Sugar reflect
   // what was logged in previous sessions today, not the stale starting values.
@@ -2338,7 +2342,14 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   }
 
   if (showFoodLog) {
-    return <FoodLogScreen user={user} setUser={setUser} onBack={() => setShowFoodLog(false)} />;
+    return (
+      <FoodLogScreen
+        user={user}
+        setUser={setUser}
+        dateKey={foodLogDateKey}
+        onBack={() => { setShowFoodLog(false); setFoodLogDateKey(null); }}
+      />
+    );
   }
 
   if (tool === 'weight')   return <WeightLogScreen onBack={() => setTool(null)} />;
@@ -2346,7 +2357,12 @@ function HomeScreen({ user, setUser, setActiveModal }) {
   if (tool === 'photos')   return <ProgressPhotosScreen onBack={() => setTool(null)} />;
   if (tool === 'labs')     return <LabsScreen onBack={() => setTool(null)} />;
   if (tool === 'coach')    return <MealCoachScreen onBack={() => setTool(null)} />;
-  if (tool === 'workout')  return <WorkoutLogScreen onBack={() => setTool(null)} />;
+  if (tool === 'workout')  return (
+    <WorkoutLogScreen
+      prefillDate={workoutPrefillDate}
+      onBack={() => { setTool(null); setWorkoutPrefillDate(null); }}
+    />
+  );
   if (tool === 'bodyscan') return <BodyScanScreen onBack={() => setTool(null)} />;
 
   return (
@@ -2387,7 +2403,12 @@ function HomeScreen({ user, setUser, setActiveModal }) {
       )}
 
       {/* Calendar with Injection Tracking - TOP */}
-      <HomeCalendar user={user} setUser={setUser} />
+      <HomeCalendar
+        user={user}
+        setUser={setUser}
+        onLogFood={(dateKey) => { setFoodLogDateKey(dateKey); setShowFoodLog(true); }}
+        onLogWorkout={(dateKey) => { setWorkoutPrefillDate(dateKey); setTool('workout'); }}
+      />
 
       {/* Your Progress — patient-visible compliance + streak */}
       <ComplianceCard user={user} />
@@ -2718,10 +2739,12 @@ function JourneyWeekDetail({ week, onBack }) {
 }
 
 // Home Calendar Component - Integrated tracking calendar
-function HomeCalendar({ user, setUser }) {
+function HomeCalendar({ user, setUser, onLogFood, onLogWorkout }) {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(null);
-  const [showInjectionModal, setShowInjectionModal] = useState(false);
+  // Was "showInjectionModal" — the day-tap sheet now surfaces three quick
+  // actions (injection / food / workout), so the state name was generalized.
+  const [showDayModal, setShowDayModal] = useState(false);
   
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
                       'July', 'August', 'September', 'October', 'November', 'December'];
@@ -2809,25 +2832,34 @@ function HomeCalendar({ user, setUser }) {
     setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1));
   };
 
-  // Handle clicking on any day to log injection
+  // Handle clicking on any day — opens the quick-log sheet for that date.
   const handleDayClick = (dayInfo) => {
     if (dayInfo.isCurrentMonth) {
       setSelectedDate(dayInfo.date);
-      setShowInjectionModal(true);
+      setShowDayModal(true);
     }
+  };
+
+  // Local YYYY-MM-DD key — using toISOString() would shift back a day for
+  // anyone west of UTC, so build the key from local components instead.
+  const localDateKey = (d) => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   };
 
   // Toggle injection completion
   const toggleInjectionComplete = () => {
     if (!selectedDate) return;
-    
+
     const dateStr = selectedDate.toISOString().split('T')[0];
     const existingLog = user.injectionLog?.find(inj => inj.date === dateStr && inj.type === 'glp1');
-    
+
     if (existingLog) {
       // Toggle the completion status
-      const updatedLog = user.injectionLog.map(inj => 
-        inj.date === dateStr && inj.type === 'glp1' 
+      const updatedLog = user.injectionLog.map(inj =>
+        inj.date === dateStr && inj.type === 'glp1'
           ? { ...inj, completed: !inj.completed }
           : inj
       );
@@ -2842,12 +2874,24 @@ function HomeCalendar({ user, setUser }) {
         notes: '',
         completed: true
       };
-      setUser({ 
-        ...user, 
+      setUser({
+        ...user,
         injectionLog: [...(user.injectionLog || []), newInjection]
       });
     }
-    setShowInjectionModal(false);
+    setShowDayModal(false);
+  };
+
+  const handleLogFoodForDate = () => {
+    if (!selectedDate || !onLogFood) return;
+    setShowDayModal(false);
+    onLogFood(localDateKey(selectedDate));
+  };
+
+  const handleLogWorkoutForDate = () => {
+    if (!selectedDate || !onLogWorkout) return;
+    setShowDayModal(false);
+    onLogWorkout(localDateKey(selectedDate));
   };
 
   // Change injection day preference
@@ -2959,43 +3003,51 @@ function HomeCalendar({ user, setUser }) {
           </div>
         </div>
 
-        {/* Injection Modal */}
-        {showInjectionModal && selectedDate && (
+        {/* Day quick-log sheet — injection, food, or workout for the tapped date */}
+        {showDayModal && selectedDate && (
           <div style={styles.homeCalModal}>
             <div style={styles.homeCalModalContent}>
               <h4 style={styles.homeCalModalTitle}>
                 {selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
               </h4>
+
+              {/* Injection — same toggle as before, condensed */}
               <p style={styles.homeCalModalDose}>
-                💉 GLP-1 Injection • {user.medicationDose}
+                💉 GLP-1 Injection{user.medicationDose ? ` • ${user.medicationDose}` : ''}
               </p>
-              
               {isInjectionCompleted(selectedDate) ? (
                 <>
                   <div style={styles.homeCalModalCompleted}>
                     <span style={styles.homeCalModalCompletedIcon}>✓</span>
-                    <span>Injection Logged</span>
+                    <span>Injection logged</span>
                   </div>
-                  <button 
-                    style={styles.homeCalModalBtnUndo}
-                    onClick={toggleInjectionComplete}
-                  >
-                    Remove Log
+                  <button style={styles.homeCalModalBtnUndo} onClick={toggleInjectionComplete}>
+                    Remove injection log
                   </button>
                 </>
               ) : (
-                <button 
-                  style={styles.homeCalModalBtn}
-                  onClick={toggleInjectionComplete}
-                >
-                  ✓ Log Injection
+                <button style={styles.homeCalModalBtn} onClick={toggleInjectionComplete}>
+                  ✓ Log injection
                 </button>
               )}
-              
-              <button 
-                style={styles.homeCalModalClose}
-                onClick={() => setShowInjectionModal(false)}
+
+              {/* Divider + the other two quick logs */}
+              <div style={{ height: 1, background: '#EAE8E4', margin: '14px 0 10px' }} />
+
+              <button
+                style={{ ...styles.homeCalModalBtn, background: '#fff', color: '#2C2C2C', border: '1px solid #E8E5DF', marginBottom: 8 }}
+                onClick={handleLogFoodForDate}
               >
+                🍽️ Log food for this day
+              </button>
+              <button
+                style={{ ...styles.homeCalModalBtn, background: '#fff', color: '#2C2C2C', border: '1px solid #E8E5DF' }}
+                onClick={handleLogWorkoutForDate}
+              >
+                🏋️ Log workout for this day
+              </button>
+
+              <button style={styles.homeCalModalClose} onClick={() => setShowDayModal(false)}>
                 Cancel
               </button>
             </div>
@@ -10668,8 +10720,13 @@ const extractNutrients = (food) => {
   return out;
 };
 
-function FoodLogScreen({ user, setUser, onBack }) {
-  const [dateKey] = useState(todayKey());
+function FoodLogScreen({ user, setUser, onBack, dateKey: dateKeyProp }) {
+  // Optional dateKey prop lets the calendar back-date a food log entry.
+  // When unset, defaults to today and behaves identically to the original
+  // single-day food log screen.
+  const [dateKey] = useState(dateKeyProp || todayKey());
+  const isToday = dateKey === todayKey();
+  const viewDate = new Date(`${dateKey}T12:00:00`);
   const [entries, setEntries] = useState([]);
   const [showAdd, setShowAdd] = useState(null); // meal name to add to, or null
   const [showPhoto, setShowPhoto] = useState(false); // camera/AI flow
@@ -10698,8 +10755,10 @@ function FoodLogScreen({ user, setUser, onBack }) {
 
   // Daily Goals (Protein, Fiber, Sugar) are derived from the food log — push
   // the running totals back up so HomeScreen reflects what's been logged.
+  // Only sync when viewing today; back-dating yesterday's lunch shouldn't
+  // overwrite today's running totals.
   useEffect(() => {
-    if (!setUser) return;
+    if (!setUser || !isToday) return;
     const nextProtein = Math.round(totals.protein);
     const nextFiber = Math.round(totals.fiber);
     const nextSugar = Math.round(totals.sugar);
@@ -10709,11 +10768,37 @@ function FoodLogScreen({ user, setUser, onBack }) {
       user.sugarCurrent === nextSugar
     ) return;
     setUser({ ...user, proteinCurrent: nextProtein, fiberCurrent: nextFiber, sugarCurrent: nextSugar });
-  }, [totals.protein, totals.fiber, totals.sugar, setUser]);
+  }, [totals.protein, totals.fiber, totals.sugar, setUser, isToday]);
 
   const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
   const [recents, setRecents] = useState([]);
   useEffect(() => { setRecents(loadRecentFoods()); }, []);
+
+  // Surface today's planned meals from the AI meal plan as one-tap adds.
+  // Match on weekday name (the plan stores days as "Monday"…"Sunday" without
+  // a calendar date) — fall back to the first day if no match. Each plan
+  // entry already has macros, so adding to the log is a straight copy.
+  const planDayName = viewDate.toLocaleDateString('en-US', { weekday: 'long' });
+  const planDay =
+    user.mealPlan?.weeklyPlan?.find(d => d.day === planDayName) ||
+    user.mealPlan?.weeklyPlan?.[0] || null;
+
+  const MEAL_TYPE_TO_SECTION = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner' };
+  const SECTION_EMOJI = { Breakfast: '🌅', Lunch: '🥗', Dinner: '🍽️', Snacks: '🍎' };
+
+  const addPlanMeal = (mealName, plannedFood) => {
+    addEntry(mealName, {
+      name: plannedFood.name,
+      servingLabel: '1 serving',
+      servings: 1,
+      calories: Number(plannedFood.calories) || 0,
+      protein: Number(plannedFood.protein) || 0,
+      carbs: Number(plannedFood.carbs) || 0,
+      fat: Number(plannedFood.fat) || 0,
+      fiber: Number(plannedFood.fiber) || 0,
+      sugar: 0,
+    });
+  };
 
   const addEntry = (mealName, food) => {
     const entry = { ...food, meal: mealName, id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}` };
@@ -10741,7 +10826,10 @@ function FoodLogScreen({ user, setUser, onBack }) {
       <header style={styles.pageHeader}>
         <button style={styles.backButton} onClick={onBack}>← Back</button>
         <h1 style={styles.pageTitle}>Food Log</h1>
-        <p style={styles.pageSubtitle}>{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+        <p style={styles.pageSubtitle}>
+          {viewDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+          {!isToday && <span style={{ marginLeft: 8, color: '#C4956A', fontWeight: 600 }}>· back-dated</span>}
+        </p>
       </header>
 
       <div style={styles.foodLogTotalsCard}>
@@ -10794,6 +10882,80 @@ function FoodLogScreen({ user, setUser, onBack }) {
       >
         <span style={{fontSize: 18}}>📷</span> Snap a meal — auto-log nutrition
       </button>
+
+      {/* From your AI meal plan — one-tap log of today's planned meals/snacks.
+          Only shows when the patient has a generated plan. */}
+      {planDay && (
+        <section style={styles.section}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8 }}>
+            <h3 style={styles.sectionTitle}>From your plan · {planDay.day}</h3>
+            <span style={{ fontSize: 11, color: '#9B7E60', fontWeight: 600 }}>✨ AI plan</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginLeft: -4, paddingLeft: 4 }}>
+            {(planDay.meals || []).map((m, i) => {
+              const sectionName = MEAL_TYPE_TO_SECTION[String(m.type).toLowerCase()] || 'Snacks';
+              return (
+                <button
+                  key={`meal-${i}`}
+                  onClick={() => addPlanMeal(sectionName, m)}
+                  style={{
+                    flex: '0 0 auto',
+                    background: '#FFFBF3',
+                    border: '1px solid #E8D8B8',
+                    borderRadius: 12,
+                    padding: '10px 12px',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    minWidth: 170,
+                    maxWidth: 220,
+                  }}
+                  title={`Log ${m.name} to ${sectionName}`}
+                >
+                  <p style={{ fontSize: 10, color: '#9B7E60', margin: 0, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600 }}>
+                    {SECTION_EMOJI[sectionName]} {sectionName}
+                  </p>
+                  <p style={{ fontSize: 12, fontWeight: 600, margin: '4px 0 0', color: '#2B2B2B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {m.name}
+                  </p>
+                  <p style={{ fontSize: 11, color: '#888', margin: '2px 0 0' }}>
+                    {Math.round(Number(m.calories) || 0)} cal · P {Math.round(Number(m.protein) || 0)}g
+                  </p>
+                  <p style={{ fontSize: 10, color: '#4A6741', margin: '4px 0 0', fontWeight: 600 }}>＋ Tap to log</p>
+                </button>
+              );
+            })}
+            {(planDay.snacks || []).map((s, i) => (
+              <button
+                key={`snack-${i}`}
+                onClick={() => addPlanMeal('Snacks', s)}
+                style={{
+                  flex: '0 0 auto',
+                  background: '#FFFBF3',
+                  border: '1px solid #E8D8B8',
+                  borderRadius: 12,
+                  padding: '10px 12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  minWidth: 150,
+                  maxWidth: 200,
+                }}
+                title={`Log ${s.name} to Snacks`}
+              >
+                <p style={{ fontSize: 10, color: '#9B7E60', margin: 0, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600 }}>
+                  🍎 Snack
+                </p>
+                <p style={{ fontSize: 12, fontWeight: 600, margin: '4px 0 0', color: '#2B2B2B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {s.emoji ? `${s.emoji} ` : ''}{s.name}
+                </p>
+                <p style={{ fontSize: 11, color: '#888', margin: '2px 0 0' }}>
+                  {Math.round(Number(s.calories) || 0)} cal · P {Math.round(Number(s.protein) || 0)}g
+                </p>
+                <p style={{ fontSize: 10, color: '#4A6741', margin: '4px 0 0', fontWeight: 600 }}>＋ Tap to log</p>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Recently logged — one-tap add to Snacks */}
       {recents.length > 0 && (
@@ -20301,12 +20463,14 @@ const WORKOUT_OPTIONS = [
 const INTENSITY_LABEL = { light: 'Light', moderate: 'Moderate', vigorous: 'Vigorous' };
 const INTENSITY_COLOR = { light: '#9B9B9B', moderate: '#4A6741', vigorous: '#C24A4A' };
 
-function WorkoutLogScreen({ onBack }) {
+function WorkoutLogScreen({ onBack, prefillDate }) {
   const [entries, setEntries] = useState([]);
   const [totals, setTotals] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [showLog, setShowLog] = useState(null);          // null | { prefill }
+  // Auto-open the log modal pre-dated when the calendar deep-links here for
+  // a specific day. Plain "open workouts" navigation passes no prefillDate.
+  const [showLog, setShowLog] = useState(prefillDate ? { prefill: { recordedAt: prefillDate } } : null);
   const [importStage, setImportStage] = useState(null);  // null | 'scanning' | 'error'
   const [importError, setImportError] = useState(null);
   const [importWarnings, setImportWarnings] = useState([]);
