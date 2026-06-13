@@ -4,13 +4,6 @@ export const metadata = {
   title: 'HYDR801 Infusion & Wellness',
   description: 'Your personalized GLP-1 wellness companion - nutrition, fitness, and progress tracking',
   manifest: '/manifest.json',
-  themeColor: '#4A6741',
-  viewport: {
-    width: 'device-width',
-    initialScale: 1,
-    maximumScale: 1,
-    userScalable: false,
-  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'default',
@@ -20,6 +13,17 @@ export const metadata = {
     icon: '/icon-192.png',
     apple: '/icon-192.png',
   },
+}
+
+// Next 14 split themeColor + viewport out of the `metadata` export into a
+// dedicated `viewport` export — keeping them in metadata logs deprecation
+// warnings on every page render in dev.
+export const viewport = {
+  themeColor: '#4A6741',
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
 }
 
 export default function RootLayout({ children }) {
