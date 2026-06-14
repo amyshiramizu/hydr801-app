@@ -2510,7 +2510,6 @@ function HomeScreen({ user, setUser, setActiveModal }) {
         </div>
       </section>
 
-      {/* Track Your Progress: 5 health-tools entry cards */}
       <HealthToolsSection onOpen={(t) => setTool(t)} />
     </div>
   );
@@ -21142,35 +21141,81 @@ function BodyScanCaptureModal({ onClose, onSaved }) {
 }
 
 // ── Hub card on Home ────────────────────────────────────────────────────────
+// Health-tools section on the home screen.
+// Was a flat 4-col grid of 7 tiny tiles (cluttered, hard to scan); now a
+// Google-Health-style "focus areas" layout — two labeled groups, 2-col
+// cards with an icon tile, label, and one-line description. AI coach gets
+// a full-width row so the weekly summary surfaces above the other tools.
 function HealthToolsSection({ onOpen }) {
-  const tools = [
-    { key: 'weight', label: 'Weight', icon: '⚖️' },
-    { key: 'bodyscan', label: 'Body scan', icon: '📐' },
-    { key: 'workout', label: 'Workouts', icon: '💪' },
-    { key: 'symptoms', label: 'Symptoms', icon: '🌡️' },
-    { key: 'photos', label: 'Photos', icon: '📸' },
-    { key: 'labs', label: 'Labs', icon: '🧪' },
-    { key: 'coach', label: 'AI coach', icon: '🤖' },
+  const groups = [
+    {
+      title: 'Body & activity',
+      tools: [
+        { key: 'weight',   label: 'Weight',    icon: '⚖️', sub: 'Log + 12-week trend' },
+        { key: 'bodyscan', label: 'Body scan', icon: '📐', sub: 'On-device composition' },
+        { key: 'photos',   label: 'Photos',    icon: '📸', sub: 'Side-by-side progress' },
+        { key: 'workout',  label: 'Workouts',  icon: '💪', sub: 'Sessions + active days' },
+      ],
+    },
+    {
+      title: 'Health & insights',
+      tools: [
+        { key: 'symptoms', label: 'Symptoms', icon: '🌡️', sub: 'Side-effect tracker' },
+        { key: 'labs',     label: 'Labs',     icon: '🧪', sub: 'Upload + results' },
+        { key: 'coach',    label: 'AI coach', icon: '🤖', sub: 'Weekly health summary', wide: true },
+      ],
+    },
   ];
+
+  // Vertical card layout: icon on top, label + sub stacked beneath. In a
+  // 2-col grid each card is ~131px wide, which a horizontal icon+text row
+  // can't show meaningful copy in; stacking gives the text the full card
+  // width.
+  const cardStyle = (wide) => ({
+    gridColumn: wide ? '1 / -1' : 'auto',
+    minWidth: 0,
+    background: '#fff',
+    border: '1px solid #E8E5DF',
+    borderRadius: 14,
+    padding: wide ? '14px 16px' : '14px 12px',
+    cursor: 'pointer',
+    textAlign: wide ? 'left' : 'center',
+    display: 'flex',
+    flexDirection: wide ? 'row' : 'column',
+    alignItems: 'center',
+    gap: wide ? 12 : 8,
+    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+  });
+
   return (
     <section style={{ padding: '0 20px', marginTop: 20 }}>
-      <h3 style={{ fontSize: 16, fontWeight: 600, color: '#2C2C2C', margin: '0 0 10px', fontFamily: 'Fraunces, serif' }}>
-        Track Your Progress
-      </h3>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-        {tools.map(t => (
-          <button key={t.key}
-                  onClick={() => onOpen(t.key)}
-                  style={{
-                    background: '#fff', border: '1px solid #E8E5DF', borderRadius: 12,
-                    padding: '12px 6px', cursor: 'pointer', textAlign: 'center',
-                    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
-                  }}>
-            <div style={{ fontSize: 22 }}>{t.icon}</div>
-            <div style={{ fontSize: 10, color: '#6B6B6B', marginTop: 4, fontWeight: 500 }}>{t.label}</div>
-          </button>
-        ))}
-      </div>
+      {groups.map((g, gi) => (
+        <div key={g.title} style={{ marginBottom: gi === groups.length - 1 ? 0 : 18 }}>
+          <h3 style={{
+            fontSize: 11, fontWeight: 700, color: '#9B9B9B',
+            margin: '0 0 8px', textTransform: 'uppercase', letterSpacing: 0.8,
+          }}>
+            {g.title}
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {g.tools.map(t => (
+              <button key={t.key} onClick={() => onOpen(t.key)} style={cardStyle(t.wide)}>
+                <span style={{
+                  fontSize: 22, width: 40, height: 40, borderRadius: 10,
+                  background: '#F7F4EE',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>{t.icon}</span>
+                <span style={{ flex: t.wide ? 1 : 'initial', minWidth: 0, width: t.wide ? 'auto' : '100%' }}>
+                  <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#2C2C2C', lineHeight: 1.25 }}>{t.label}</span>
+                  <span style={{ display: 'block', fontSize: 11, color: '#9B9B9B', marginTop: 2, lineHeight: 1.3 }}>{t.sub}</span>
+                </span>
+                {t.wide && <span style={{ fontSize: 14, color: '#C4C4C4', flexShrink: 0 }}>→</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
     </section>
   );
 }
